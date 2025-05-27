@@ -28,6 +28,7 @@ def main():
     
     # load for full test
     dataset = load_from_disk("MATH_local")
+    dataset = dataset['train']
     dataset = dataset.select(range(16)) # for test
     
     logger.info("load dataset!!")
