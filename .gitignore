@@ -11,3 +11,9 @@ wheels/
 
 # logs and folders
 */
+*.ipynb
+MATH.zip
+MATH_*
+
+# slurm file
+*.slurm
