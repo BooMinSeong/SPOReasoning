@@ -107,12 +107,14 @@ if __name__ == "__main__":
     # reference model은 LoRA를 적용하지 않은 원본 모델을 사용합니다.
     ref_model = AutoModelForCausalLM.from_pretrained(model_name,
                                                      torch_dtype=torch.bfloat16,
-                                                     attn_implementation="eager") 
+                                                     attn_implementation="eager",
+                                                     device_map="auto")  # device_map="auto"로 GPU에 자동 할당
     
     # 패딩 토큰 ID 설정
     model.config.pad_token_id = tokenizer.pad_token_id
     ref_model.config.pad_token_id = tokenizer.pad_token_id
     ref_model.eval()  # 평가 모드로 전환 (LoRA 적용 시 필요)
+    # ref_model.to('cuda')
 
     # --- LoRA 설정 시작 ---
     # LoRA 하이퍼파라미터 정의
