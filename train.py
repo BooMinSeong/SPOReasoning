@@ -183,5 +183,5 @@ if __name__ == "__main__":
     trainer.train()
     print("SPO training finished!")
 
-    trainer.save_model("./final_spo_model_with_ranked")
+    # trainer.save_model("./final_spo_model_with_ranked")
     print("Model saved to ./final_spo_model_with_ranked")
