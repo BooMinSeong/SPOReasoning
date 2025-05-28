@@ -83,6 +83,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="SPO Training Script")
     parser.add_argument("--exp_name", type=str, default="spo_math", help="Experiment name for output directory")
     parser.add_argument("--dataset_path", type=str, default="./results/MATH_w_cot_parsed_filter_5_scored_N10_sorted", help="Path to the SPO dataset")
+    parser.add_argument("--alpha", type=float, default=0.01, help="Alpha parameter for SPO loss")
+    parser.add_argument("--beta", type=float, default=0.1, help="Beta parameter for SPO loss")
+    parser.add_argument("--gamma", type=float, default=0.01, help="Gamma parameter for SPO loss")
     parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate for training")
     parser.add_argument("--per_device_train_batch_size", type=int, default=1, help="Batch size per device for training")
@@ -96,7 +99,7 @@ if __name__ == "__main__":
     setup_logging(exp_name=args.exp_name)  # Set up logging with experiment name
     logging.info("Starting SPO training setup...")
     
-    model_name = "meta-llama/Llama-3.1-8b-Instruct" 
+    model_name = "meta-llama/Llama-3.2-1B-Instruct" 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
     if tokenizer.pad_token is None:
@@ -106,7 +109,8 @@ if __name__ == "__main__":
     # torch_dtype=torch.bfloat16 또는 torch.float16을 사용하여 메모리 절약
     model = AutoModelForCausalLM.from_pretrained(model_name, 
                                                  torch_dtype=torch.bfloat16,
-                                                 attn_implementation="flash_attention_2") 
+                                                 attn_implementation="flash_attention_2",
+                                                 )  # device_map="auto"로 GPU에 자동 할당
     # reference model은 LoRA를 적용하지 않은 원본 모델을 사용합니다.
     ref_model = AutoModelForCausalLM.from_pretrained(model_name,
                                                      torch_dtype=torch.bfloat16,
@@ -138,26 +142,26 @@ if __name__ == "__main__":
     instruction: str = "Solve the following math problem efficiently and clearly:\n\n- For simple problems (2 steps or fewer):\nProvide a concise solution with minimal explanation.\n\n- For complex problems (3 steps or more):\nUse this step-by-step format:\n\n## Step 1: [Concise description]\n[Brief explanation and calculations]\n\n## Step 2: [Concise description]\n[Brief explanation and calculations]\n\n...\n\nRegardless of the approach, always conclude with:\n\nTherefore, the final answer is: $\\boxed{answer}$. I hope it is correct.\n\nWhere [answer] is just the final number or expression that solves the problem.\n\nProblem: "
     # 데이터셋 인스턴스 생성
     train_dataset = load_from_disk(args.dataset_path)  # 데이터셋 경로에서 로드
-    data_collator = SPODataCollator(tokenizer, instruction = instruction, max_length=3072)
+    data_collator = SPODataCollator(tokenizer, instruction = instruction, max_length=1024)
 
     # 3. SPO Loss 함수 인스턴스 생성
-    spo_loss_fn = SPOLoss(alpha=0.5, beta=0.1, reference_model=ref_model)
+    spo_loss_fn = SPOLoss(alpha=args.alpha, beta=args.beta, gamma_score = args.gamma, reference_model=ref_model)
     metrics_callback = MetricsLoggingCallback()
     # 4. TrainingArguments 설정
     training_args = TrainingArguments(
         output_dir=f"./results/{args.exp_name}_e{args.num_epochs}",
-        num_train_epochs=args.num_epochs,              # Example: Set number of training epochs
-        per_device_train_batch_size=args.per_device_train_batch_size,   # Example: Set batch size for training
+        num_train_epochs=args.num_epochs,
+        per_device_train_batch_size=args.per_device_train_batch_size,
         # per_device_eval_batch_size=1,    # Example: Set batch size for evaluation
-        gradient_accumulation_steps=args.gradient_accumulation_steps,    # Example: Set gradient accumulation steps
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,          # Example: Set learning rate
         warmup_ratio=0.01,                # Example: Number of warmup steps
         report_to='none',         # Report to TensorBoard
-        logging_steps=1,
+        logging_steps=2,
         # eval_strategy="steps",     # Evaluate every `eval_steps`
         # eval_steps=100,                   # Example: Evaluate every 50 steps
         save_strategy="steps",           # Save checkpoint every `save_steps`
-        save_steps=100,                   # Example: Save every 50 steps
+        save_steps=20,                   # Example: Save every 50 steps
         remove_unused_columns=False,  # Important for DataCollatorForChatML
         bf16=True,                # Enable mixed precision training
         # Add other arguments like learning_rate, gradient_accumulation_steps etc. as needed
