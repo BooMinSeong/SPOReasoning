@@ -74,7 +74,7 @@ class SPOLoss(nn.Module):
         candidate_attention_mask = batch['candidate_attention_mask'] # (batch_size, num_responses, seq_len)
         candidate_labels = batch['candidate_labels']          # <--- 마스킹된 레이블 사용
         ranked_indices = batch['ranked_indices']              # (batch_size, num_responses)
-        mu_weights_k: Optional[List[torch.Tensor]] = batch.get('mu_weights_k', None) # (list of (batch_size,) tensors)
+        mu_weights_k = batch.get('mu_weights_k', None) # (list of (batch_size,) tensors)
 
         batch_size, num_responses, seq_len = candidate_input_ids.shape
 
@@ -134,12 +134,19 @@ class SPOLoss(nn.Module):
                 )
 
                 # mu_k 가중치 적용 (선택 사항)
-                if mu_weights_k is not None and k < len(mu_weights_k):
-                    # mu_weights_k[k]는 (batch_size,) 형태의 텐서여야 함
-                    if mu_weights_k[k] is not None and i < mu_weights_k[k].size(0):
-                         term_k *= mu_weights_k[k][i]
-                    # else: # 가중치가 없거나 인덱스 오류 시 경고 (collator에서 처리됨을 가정)
-                        # print(f"Warning: mu_weight for k={k}, sample={i} not found or index out of bounds.")
+                if mu_weights_k is not None:
+                    # current_ranked_original_idx가 mu_weights_k 리스트의 유효한 인덱스인지 확인
+                    if current_ranked_original_idx < len(mu_weights_k) and \
+                        mu_weights_k[current_ranked_original_idx] is not None:
+                        # 샘플 인덱스 i가 해당 텐서에 유효한지 확인
+                        if i < mu_weights_k[current_ranked_original_idx].size(0):
+                            # k번째 순위를 차지한 아이템의 '고유 가중치'를 가져옴
+                            inherent_weight_of_chosen_item = mu_weights_k[current_ranked_original_idx][i]
+                            term_k *= inherent_weight_of_chosen_item
+                        # else: # 가중치 텐서에 현재 샘플 인덱스가 없는 경우 (데이터 오류 가능성)
+                            # print(f"Warning: Weight for original item idx {current_ranked_original_idx}, sample {i} not found.")
+                    # else: # current_ranked_original_idx가 mu_weights_k 범위 밖인 경우 (데이터 오류 가능성)
+                        # print(f"Warning: current_ranked_original_idx {current_ranked_original_idx} out of bounds for mu_weights_k list.")
 
                 sample_spo_loss += term_k
             
@@ -188,18 +195,6 @@ class CustomSPOTrainer(Trainer):
 
         return (loss, None) if return_outputs else loss
 
-
-# --- 기존 코드의 일부 ---
-import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer
-from typing import List, Dict, Any
-
-# --- 기존 코드의 일부 ---
-import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer
-from typing import List, Dict, Any
 
 # --- SPODataCollator 수정 ---
 import torch
@@ -433,204 +428,4 @@ class SPODataCollator:
                     batch['mu_weights_k'] = []
             else:
                 batch['mu_weights_k'] = []
-        return batch
-# filepath: spo.py
-import torch
-from transformers import AutoTokenizer # 필요한 경우 AutoTokenizer를 임포트합니다.
-
-# --- RankedSPODataCollator 수정 ---
-class RankedSPODataCollator:
-    def __init__(self, tokenizer: AutoTokenizer, max_length: int = 512):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        if self.tokenizer.pad_token is None: # Ensure pad token is set
-            if self.tokenizer.eos_token is not None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-            else:
-                # If no eos_token either, raise an error as a pad token is essential for padding
-                raise ValueError(
-                    "The tokenizer does not have a pad_token. "
-                    "Please set model.config.pad_token_id or tokenizer.pad_token directly. "
-                    "If an eos_token is available, it can be used as a pad_token."
-                )
-        # Ensure pad_token_id is also set if pad_token was set from eos_token
-        if self.tokenizer.pad_token_id is None and self.tokenizer.pad_token is not None:
-            self.tokenizer.pad_token_id = self.tokenizer.convert_tokens_to_ids(self.tokenizer.pad_token)
-
-
-    def __call__(self, features: list) -> dict:
-        if not features:
-            return {}
-
-        first_item_type = features[0].get("type")
-        if first_item_type is None:
-            raise ValueError("The first feature must have a 'type' key.")
-
-        for feature in features:
-            feature_type = feature.get("type")
-            if feature_type is None:
-                raise ValueError("Each feature must have a 'type' key.")
-            if feature_type != first_item_type:
-                raise ValueError("All items in a batch must be of the same preference type (best_of_n or ranked).")
-
-        batch: Dict[str, Union[List[Any], torch.Tensor, Any]] = {
-            "type": [first_item_type] * len(features)
-        }
-
-        batch_candidate_input_ids = []
-        batch_candidate_attention_mask = []
-        batch_candidate_label_ids = [] # 마스킹된 레이블을 저장할 리스트
-
-        if first_item_type == "best_of_n":
-            batch_chosen_index_in_candidates = []
-            batch_mu_weights = []
-        elif first_item_type == "ranked":
-            batch_ranked_indices = []
-            batch_mu_weights_k_list = []
-
-        # Precompute the maximum sequence length in the batch after truncation
-        max_seq_len_in_batch = 0
-        for feature in features:
-            prompt_text = feature["prompt"]
-            responses_text = feature["responses"]
-            for response_text in responses_text:
-                full_text = prompt_text + response_text
-                full_tokens = self.tokenizer(
-                    full_text,
-                    max_length=self.max_length,
-                    truncation=True,
-                    add_special_tokens=True
-                ) # type: ignore
-                max_seq_len_in_batch = max(max_seq_len_in_batch, len(full_tokens.input_ids))
-        
-        # If max_seq_len_in_batch is 0 (e.g., all inputs were empty), default to a minimal length like 1
-        # or handle as an error, depending on desired behavior. Here, we ensure it's at least 1.
-        if max_seq_len_in_batch == 0:
-             max_seq_len_in_batch = 1
-
-
-        for feature in features:
-            prompt_text = feature["prompt"]
-            responses_text = feature["responses"]
-
-            prompt_only_ids = self.tokenizer.encode(
-                prompt_text,
-                add_special_tokens=True,
-                truncation=True,
-                max_length=self.max_length
-            )
-            len_prompt_tokens_in_full = len(prompt_only_ids)
-
-            sample_candidate_input_ids = []
-            sample_candidate_attention_mask = []
-            sample_candidate_label_ids = [] # 현재 샘플의 마스킹된 레이블 리스트
-
-            for response_text in responses_text:
-                full_text = prompt_text + response_text
-                full_tokens = self.tokenizer(
-                    full_text,
-                    max_length=self.max_length, # Use the pre-calculated max_seq_len_in_batch for padding consistency
-                    truncation=True,
-                    add_special_tokens=True,
-                    # padding="max_length", # Padding will be handled manually after collecting all items for the sample
-                ) # type: ignore
-                current_input_ids = torch.tensor(full_tokens.input_ids)
-                current_attention_mask = torch.tensor(full_tokens.attention_mask)
-
-                current_labels = current_input_ids.clone()
-                mask_end_idx = min(len_prompt_tokens_in_full, current_labels.size(0))
-                current_labels[:mask_end_idx] = -100
-
-                sample_candidate_input_ids.append(current_input_ids)
-                sample_candidate_attention_mask.append(current_attention_mask)
-                sample_candidate_label_ids.append(current_labels)
-            
-            # Pad all candidates for the current sample to max_seq_len_in_batch
-            padded_ids_for_sample_list = []
-            padded_attn_for_sample_list = []
-            padded_labels_for_sample_list = []
-
-            for ids_t, attn_t, labels_t in zip(sample_candidate_input_ids, sample_candidate_attention_mask, sample_candidate_label_ids):
-                seq_len = ids_t.size(0)
-                
-                padding_needed = max_seq_len_in_batch - seq_len
-                
-                padded_ids = torch.cat([ids_t, torch.full((padding_needed,), self.tokenizer.pad_token_id, dtype=torch.long)], dim=0)
-                padded_attn = torch.cat([attn_t, torch.zeros(padding_needed, dtype=torch.long)], dim=0)
-                padded_labels = torch.cat([labels_t, torch.full((padding_needed,), -100, dtype=torch.long)], dim=0)
-
-                padded_ids_for_sample_list.append(padded_ids)
-                padded_attn_for_sample_list.append(padded_attn)
-                padded_labels_for_sample_list.append(padded_labels)
-
-            if not padded_ids_for_sample_list: # Should not happen if responses_text is not empty
-                # Handle empty sample candidates if necessary, e.g., by creating dummy tensors
-                # For now, assume responses_text always yields some candidates
-                # If it can be empty, one might need to add placeholder tensors of appropriate shape.
-                # Example:
-                # num_candidates_expected = 1 # Or some other default
-                # padded_ids_for_sample = torch.full((num_candidates_expected, max_seq_len_in_batch), fill_value=self.tokenizer.pad_token_id, dtype=torch.long)
-                # padded_attn_for_sample = torch.zeros((num_candidates_expected, max_seq_len_in_batch), dtype=torch.long)
-                # padded_labels_for_sample = torch.full((num_candidates_expected, max_seq_len_in_batch), fill_value=-100, dtype=torch.long)
-                # Fallback or error for empty candidates
-                if not responses_text : # if responses_text was empty for this feature
-                    # Create a dummy tensor to maintain batch structure if required
-                    # This assumes at least one "candidate" slot, filled with padding.
-                    # Adjust num_dummy_candidates as per requirements.
-                    num_dummy_candidates = 1 
-                    padded_ids_for_sample = torch.full((num_dummy_candidates, max_seq_len_in_batch), self.tokenizer.pad_token_id, dtype=torch.long)
-                    padded_attn_for_sample = torch.zeros((num_dummy_candidates, max_seq_len_in_batch), dtype=torch.long)
-                    padded_labels_for_sample = torch.full((num_dummy_candidates, max_seq_len_in_batch), -100, dtype=torch.long)
-                else: # This case should ideally not be reached if responses_text is processed
-                    raise ValueError("padded_ids_for_sample_list is empty unexpectedly.")
-
-            else:
-                padded_ids_for_sample = torch.stack(padded_ids_for_sample_list)
-                padded_attn_for_sample = torch.stack(padded_attn_for_sample_list)
-                padded_labels_for_sample = torch.stack(padded_labels_for_sample_list)
-
-
-            batch_candidate_input_ids.append(padded_ids_for_sample)
-            batch_candidate_attention_mask.append(padded_attn_for_sample)
-            batch_candidate_label_ids.append(padded_labels_for_sample)
-
-            if first_item_type == "ranked":
-                batch_ranked_indices.append(feature["ranked_indices"])
-                batch_mu_weights_k_list.append(feature.get("mu_weights_k", []))
-
-        batch['candidate_input_ids'] = torch.stack(batch_candidate_input_ids)
-        batch['candidate_attention_mask'] = torch.stack(batch_candidate_attention_mask)
-        batch['candidate_label_ids'] = torch.stack(batch_candidate_label_ids)
-
-        if first_item_type == "ranked":
-            batch['ranked_indices'] = batch_ranked_indices # List of lists of integers
-
-            if not batch_mu_weights_k_list:
-                batch['mu_weights_k'] = []
-            else:
-                non_empty_lists = [lst for lst in batch_mu_weights_k_list if lst]
-                if not non_empty_lists:
-                    batch['mu_weights_k'] = []
-                else:
-                    first_len = len(non_empty_lists[0])
-                    if not all(len(lst) == first_len for lst in non_empty_lists):
-                        # Option 1: Raise error (as in original intent)
-                        raise ValueError("mu_weights_k lists have variable lengths among non-empty lists, which is not supported.")
-                        # Option 2: Print warning and pad/truncate (more complex, not implemented here)
-                        # print("Warning: mu_weights_k lists have variable lengths. This may lead to issues.")
-                        # batch['mu_weights_k'] = [] # Or handle by padding/truncating
-                    
-                    # Pad empty lists to first_len before transposing
-                    processed_mu_weights_k_list = []
-                    for w_list in batch_mu_weights_k_list:
-                        if w_list:
-                            processed_mu_weights_k_list.append(w_list)
-                        else:
-                            processed_mu_weights_k_list.append([0.0] * first_len) # Pad empty original lists
-
-                    if not processed_mu_weights_k_list or not processed_mu_weights_k_list[0]: # Should be non-empty if non_empty_lists was populated
-                        batch['mu_weights_k'] = []
-                    else:
-                        transposed_mu_k = list(map(list, zip(*processed_mu_weights_k_list)))
-                        batch['mu_weights_k'] = [torch.tensor(m, dtype=torch.float) for m in transposed_mu_k]
         return batch

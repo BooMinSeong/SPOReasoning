@@ -103,11 +103,11 @@ if __name__ == "__main__":
     # torch_dtype=torch.bfloat16 또는 torch.float16을 사용하여 메모리 절약
     model = AutoModelForCausalLM.from_pretrained(model_name, 
                                                  torch_dtype=torch.bfloat16,
-                                                 attn_implementation="eager") 
+                                                 attn_implementation="flash_attention_2") 
     # reference model은 LoRA를 적용하지 않은 원본 모델을 사용합니다.
     ref_model = AutoModelForCausalLM.from_pretrained(model_name,
                                                      torch_dtype=torch.bfloat16,
-                                                     attn_implementation="eager",
+                                                     attn_implementation="flash_attention_2",
                                                      device_map="auto")  # device_map="auto"로 GPU에 자동 할당
     
     # 패딩 토큰 ID 설정
@@ -145,7 +145,7 @@ if __name__ == "__main__":
                 "코미디 영화를 선호합니다."
             ],
             "ranked_indices": [2, 0, 3, 1], # responses[2] > responses[0] > responses[3] > responses[1]
-            "mu_weights_k": [1.0, 0.8, 0.5] # mu_0, mu_1, mu_2 (k=0 to n-2)
+            "mu_weights_k": [0.6, 0.9, 0.5, 0.8]
         },
         {
             "type": "ranked",
@@ -157,7 +157,7 @@ if __name__ == "__main__":
                 "여행 계획을 세워볼까요?"
             ],
             "ranked_indices": [0, 3, 1, 2], # responses[0] > responses[3] > responses[1] > responses[2]
-            "mu_weights_k": [1.0, 0.9, 0.6]
+            "mu_weights_k": [1.0, 0.4, 0.9, 0.6]
         },
         {
             "type": "ranked",
@@ -169,7 +169,7 @@ if __name__ == "__main__":
                 "중식도 좋아합니다."
             ],
             "ranked_indices": [1, 0, 3, 2], # responses[1] > responses[0] > responses[3] > responses[2]
-            "mu_weights_k": [1.0, 0.7, 0.4]
+            "mu_weights_k": [0.7, 1.0, 0.4, 0.5]
         },
         {
             "type": "ranked",
@@ -181,7 +181,7 @@ if __name__ == "__main__":
                 "겨울의 눈도 아름답습니다."
             ],
             "ranked_indices": [0, 1, 2, 3], # responses[0] > responses[1] > responses[2] > responses[3]
-            "mu_weights_k": [1.0, 0.8, 0.5]
+            "mu_weights_k": [1.0, 0.8, 0.5, 0.2]
         },
         
     ]
