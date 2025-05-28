@@ -29,7 +29,7 @@ def main():
     # load for full test
     dataset = load_from_disk("MATH_local")
     dataset = dataset['train']
-    dataset = dataset.select(range(16)) # for test
+    # dataset = dataset.select(range(16)) # for test
     
     logger.info("load dataset!!")
 
@@ -40,6 +40,7 @@ def main():
     # GPU 개수를 확인하고, LLM 인스턴스 생성
     num_gpus = torch.cuda.device_count()
     model_name = "meta-llama/Llama-3.2-1B-Instruct"
+    save_path = os.path.join("results",model_name.split("/")[-1], dataset_save_name)
 
     instrcut_model = True if "Instruct" in model_name else False
     logger.info(f"instruct model: {instrcut_model}")
@@ -88,12 +89,14 @@ def main():
     dataset = dataset.map(
         generate_response, 
         batched=True, 
-        batch_size=16,
+        batch_size=320,
         desc=f"generate answers"
         )
+    # 멈추는 에러 핸들링 위해 중간 저장
+    dataset.save_to_disk(save_path)
 
-    dataset = score(dataset)    
-    save_path = os.path.join("results",model_name.split("/")[-1], dataset_save_name)
+    dataset = score(dataset)
+    
 
     dataset.save_to_disk(save_path)
     logger.info("Done 🔥!")
