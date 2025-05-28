@@ -85,6 +85,8 @@ def parse_args():
     parser.add_argument("--dataset_path", type=str, default="./results/MATH_w_cot_parsed_filter_5_scored_N10_sorted", help="Path to the SPO dataset")
     parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate for training")
+    parser.add_argument("--per_device_train_batch_size", type=int, default=1, help="Batch size per device for training")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=16, help="Number of gradient accumulation steps")
     return parser.parse_args()
 
 # --- 4. Main Training Script ---
@@ -133,10 +135,10 @@ if __name__ == "__main__":
     # 학습 가능한 파라미터 수 확인 (LoRA 적용 후 훨씬 적어짐)
     model.print_trainable_parameters()
     # --- LoRA 설정 끝 ---
-
+    instruction: str = "Solve the following math problem efficiently and clearly:\n\n- For simple problems (2 steps or fewer):\nProvide a concise solution with minimal explanation.\n\n- For complex problems (3 steps or more):\nUse this step-by-step format:\n\n## Step 1: [Concise description]\n[Brief explanation and calculations]\n\n## Step 2: [Concise description]\n[Brief explanation and calculations]\n\n...\n\nRegardless of the approach, always conclude with:\n\nTherefore, the final answer is: $\\boxed{answer}$. I hope it is correct.\n\nWhere [answer] is just the final number or expression that solves the problem.\n\nProblem: "
     # 데이터셋 인스턴스 생성
     train_dataset = load_from_disk(args.dataset_path)  # 데이터셋 경로에서 로드
-    data_collator = SPODataCollator(tokenizer, max_length=3072)
+    data_collator = SPODataCollator(tokenizer, instruction = instruction, max_length=3072)
 
     # 3. SPO Loss 함수 인스턴스 생성
     spo_loss_fn = SPOLoss(alpha=0.5, beta=0.1, reference_model=ref_model)
@@ -145,9 +147,9 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=f"./results/{args.exp_name}_e{args.num_epochs}",
         num_train_epochs=args.num_epochs,              # Example: Set number of training epochs
-        per_device_train_batch_size=1,   # Example: Set batch size for training
+        per_device_train_batch_size=args.per_device_train_batch_size,   # Example: Set batch size for training
         # per_device_eval_batch_size=1,    # Example: Set batch size for evaluation
-        gradient_accumulation_steps=1,    # Example: Set gradient accumulation steps
+        gradient_accumulation_steps=args.gradient_accumulation_steps,    # Example: Set gradient accumulation steps
         learning_rate=args.learning_rate,          # Example: Set learning rate
         warmup_ratio=0.01,                # Example: Number of warmup steps
         report_to='none',         # Report to TensorBoard

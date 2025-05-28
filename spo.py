@@ -236,54 +236,110 @@ class CustomSPOTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None): # <-- num_items_in_batch 추가
         model.train()
 
-        loss_type = inputs['type'][0] 
 
-        if loss_type == "ranked":
-            loss = self.spo_loss_fn.forward(model, inputs)
-        else:
-            raise ValueError(f"Unknown loss type: {loss_type}")
+        loss = self.spo_loss_fn.forward(model, inputs)
 
         return (loss, None) if return_outputs else loss
 
 
 # --- SPODataCollator 수정 ---
 import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer # 최상단에 이미 있을 수 있음
-from typing import List, Dict, Any # 최상단에 이미 있을 수 있음
+from typing import List, Dict, Any, Optional
 
-# --- SPODataCollator 수정 ---
+# Assuming you have your tokenizer loaded, e.g., from transformers
+# from transformers import AutoTokenizer
+# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf") # Example
+
 class SPODataCollator:
-    def __init__(self, tokenizer,instruction, max_length: int = 512):
+    def __init__(self, tokenizer: Any, instruction: str, max_length: int = 512, model_type: str = "decoder"):
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.instruction = instruction
+        self.instruction = instruction.strip()
+        self.model_type = model_type # "decoder" or "encoder-decoder"
 
         if self.tokenizer.pad_token is None:
             if self.tokenizer.eos_token is not None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-            else: # Fallback: try to add a generic pad token
+                print(f"Warning: tokenizer.pad_token was None, set to eos_token: {self.tokenizer.pad_token}")
+            else:
                 try:
-                    self.tokenizer.add_special_tokens({'pad_token': '[PAD]'}) # Or some other token
-                    self.tokenizer.pad_token_id = self.tokenizer.convert_tokens_to_ids(self.tokenizer.pad_token)
-                    print("Warning: Tokenizer did not have a pad_token. Added new one and set it as pad_token.")
-                except:
-                    raise ValueError("Tokenizer needs a pad_token or eos_token, or be configurable to add one.")
+                    # Try adding a common pad token. If your tokenizer has a different one, adjust.
+                    self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                    print(f"Warning: Tokenizer did not have a pad_token. Added new one ('[PAD]') and set it as pad_token.")
+                except Exception as e:
+                    raise ValueError(
+                        "Tokenizer needs a pad_token or eos_token, or be configurable to add one. "
+                        f"Attempting to add '[PAD]' failed: {e}"
+                    )
         
+        # Some tokenizers might have pad_token set but not pad_token_id
         if self.tokenizer.pad_token_id is None and self.tokenizer.pad_token is not None:
              self.tokenizer.pad_token_id = self.tokenizer.convert_tokens_to_ids(self.tokenizer.pad_token)
+
+        # For decoder-only models, padding on the left is often preferred during training.
+        # However, since we are manually padding to the right in this collator,
+        # this setting primarily affects tokenizer's own padding if used directly elsewhere.
+        # For apply_chat_template, direct padding control is less common.
+        if self.model_type == "decoder" and self.tokenizer.padding_side != "right":
+            print(f"Info: For decoder models, right padding is applied by this collator. Current tokenizer.padding_side='{self.tokenizer.padding_side}'.")
+            # tokenizer.padding_side = "left" # if you prefer left padding and tokenizer supports it for other ops
+
+
+    def _apply_chat_template_for_sequence(self, prompt_text: str, response_text: Optional[str] = None) -> List[int]:
+        """
+        Applies chat template for a prompt and an optional response.
+        If response_text is None, it's for calculating prompt length (add_generation_prompt=True).
+        If response_text is provided, it's for the full sequence (add_generation_prompt=False).
+        """
+        messages = []
+        if self.instruction: # Add instruction as a system prompt or part of user prompt
+            # Option 1: Add as a separate system message if tokenizer supports it well
+            # messages.append({"role": "system", "content": self.instruction})
+            # messages.append({"role": "user", "content": prompt_text})
+            # Option 2: Prepend to user prompt (simpler, more general)
+            full_prompt = self.instruction + " " + prompt_text if self.instruction else prompt_text
+            messages.append({"role": "user", "content": full_prompt})
+        else:
+            messages.append({"role": "user", "content": prompt_text})
+
+        if response_text is not None:
+            messages.append({"role": "assistant", "content": response_text})
+            # For training, we provide the assistant's message, so no generation prompt needed.
+            add_gen_prompt = False
+        else:
+            # To get the length of the prompt *including* template tokens leading to assistant's turn
+            add_gen_prompt = True
+
+        try:
+            token_ids = self.tokenizer.apply_chat_template(
+                messages,
+                max_length=self.max_length,
+                truncation=True,
+                add_generation_prompt=add_gen_prompt, # Key difference
+                # return_tensors="pt", # We'll convert to tensor later after padding
+                return_attention_mask=False # We create it manually after padding
+            )
+            # If apply_chat_template returns a list of lists (e.g. for some tokenizers when not returning tensors)
+            if isinstance(token_ids, list) and token_ids and isinstance(token_ids[0], list):
+                token_ids = token_ids[0]
+            return token_ids
+        except Exception as e:
+            print(f"Error applying chat template. Messages: {messages}, add_generation_prompt: {add_gen_prompt}")
+            print(f"Tokenizer: {self.tokenizer}")
+            # Try to get more info if it's a common Hugging Face tokenizer
+            if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is None:
+                print("Critical: tokenizer.chat_template is None. You need to set a chat template for this tokenizer first. "
+                      "Example: tokenizer.chat_template = \"{% for message in messages %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token }}{% endif %}{% endfor %}\"")
+            raise e
 
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         if not features:
             return {}
 
-        first_item_type = features[0].get("type")
+        first_item_type = 'ranked'
         if first_item_type is None: raise ValueError("Feature must have a 'type' key.")
 
-        # Assuming K (num_responses_per_sample) is consistent for 'ranked' type
-        # For 'best_of_n', K might be implicit or vary, handled by its specific logic.
         num_responses_per_sample = 0
         if first_item_type == "ranked":
             if not features[0].get("completions") or not isinstance(features[0]["completions"], list):
@@ -291,31 +347,25 @@ class SPODataCollator:
             num_responses_per_sample = len(features[0]["completions"])
             if num_responses_per_sample == 0:
                 raise ValueError("Type 'ranked' features must have at least one completion.")
-        elif first_item_type == "best_of_n": # For best_of_n, completions list might determine K
+        elif first_item_type == "best_of_n":
             num_responses_per_sample = len(features[0].get("completions", []))
 
 
-        # 1. 배치 전체에서 최대 시퀀스 길이 계산 (prompt + completion)
         global_max_seq_len_in_batch = 0
         for feature in features:
             prompt_text = feature["problem"]
-            responses_text = feature["completions"] # Assumed to be List[str] of length K
+            responses_text = feature["completions"]
 
-            # 데이터 일관성 가정: 모든 ranked feature는 K개의 completions를 가짐
             if first_item_type == "ranked" and len(responses_text) != num_responses_per_sample:
                 raise ValueError(f"Data inconsistency: Feature '{feature.get('problem','N/A')}' has {len(responses_text)} completions, expected {num_responses_per_sample}.")
 
             for response_text in responses_text:
-                full_text = self.instruction +prompt_text + " " + response_text # Simple concatenation
-                full_tokens = self.tokenizer(
-                    full_text,
-                    max_length=self.max_length,
-                    truncation=True,
-                    add_special_tokens=True
-                )
-                global_max_seq_len_in_batch = max(global_max_seq_len_in_batch, len(full_tokens["input_ids"]))
+                full_token_ids = self._apply_chat_template_for_sequence(prompt_text, response_text)
+                global_max_seq_len_in_batch = max(global_max_seq_len_in_batch, len(full_token_ids))
         
-        if global_max_seq_len_in_batch == 0: global_max_seq_len_in_batch = 1 # Avoid division by zero if all inputs are empty
+        if global_max_seq_len_in_batch == 0 and num_responses_per_sample > 0 : # if num_responses_per_sample is 0, this is fine
+             raise ValueError("global_max_seq_len_in_batch is 0. This might happen if all completions are empty or chat template produces empty output.")
+        if global_max_seq_len_in_batch == 0: global_max_seq_len_in_batch = 1 # Avoid issues with empty tensors if K=0
 
         batch_candidate_input_ids = []
         batch_candidate_attention_mask = []
@@ -325,85 +375,135 @@ class SPODataCollator:
             batch_chosen_index_in_candidates = []
             batch_mu_weights_scalar = []
         elif first_item_type == "ranked":
-            batch_mu_weights_k_list = [] # Stores List[float] for each sample
+            batch_mu_weights_k_list = []
 
         for feature in features:
             prompt_text = feature["problem"]
-            responses_text = feature["completions"] # Assumed List[str] of length K
+            responses_text = feature["completions"]
 
-            prompt_tokens_dict = self.tokenizer(
-                prompt_text,
-                max_length=self.max_length,
-                truncation=True,
-                add_special_tokens=True # e.g., BOS + prompt_tokens
-            )
-            len_prompt_tokens_in_full = len(prompt_tokens_dict["input_ids"])
+            # Determine the length of the tokenized prompt (including instruction and template)
+            # to know where to start labels.
+            # Here, response_text is None, so _apply_chat_template_for_sequence uses add_generation_prompt=True
+            prompt_only_token_ids = self._apply_chat_template_for_sequence(prompt_text, None)
+            len_prompt_tokens_in_full = len(prompt_only_token_ids)
+            
+            # Ensure prompt tokens are not empty, otherwise masking labels might be problematic.
+            if len_prompt_tokens_in_full == 0 and any(responses_text):
+                 print(f"Warning: Prompt tokenization resulted in zero tokens for prompt: '{prompt_text}'. This might lead to incorrect label masking.")
+
 
             sample_cand_ids, sample_cand_attn, sample_cand_labels = [], [], []
 
-            for response_text in responses_text: # This loop runs K times
-                full_text = prompt_text + " " + response_text
-                full_tokens = self.tokenizer(
-                    full_text,
-                    max_length=self.max_length,
-                    truncation=True,
-                    add_special_tokens=True # BOS + prompt + response + EOS (or similar)
-                )
-                input_ids_list = full_tokens["input_ids"]
-                attention_mask_list = full_tokens["attention_mask"]
-
-                padding_len = global_max_seq_len_in_batch - len(input_ids_list)
+            for response_text in responses_text:
+                # Tokenize full sequence (prompt + response) using chat template
+                # Here, response_text is provided, so _apply_chat_template_for_sequence uses add_generation_prompt=False
+                full_token_ids = self._apply_chat_template_for_sequence(prompt_text, response_text)
                 
-                final_ids = torch.tensor(input_ids_list + [self.tokenizer.pad_token_id] * padding_len, dtype=torch.long)
-                final_attn = torch.tensor(attention_mask_list + [0] * padding_len, dtype=torch.long)
+                current_seq_len = len(full_token_ids)
+                padding_len = global_max_seq_len_in_batch - current_seq_len
+                
+                final_ids_list = full_token_ids + [self.tokenizer.pad_token_id] * padding_len
+                final_attn_list = [1] * current_seq_len + [0] * padding_len
+
+                final_ids = torch.tensor(final_ids_list, dtype=torch.long)
+                final_attn = torch.tensor(final_attn_list, dtype=torch.long)
                 
                 final_labels = final_ids.clone()
-                mask_end_idx = min(len_prompt_tokens_in_full, final_labels.size(0))
-                final_labels[:mask_end_idx] = -100 # Mask prompt tokens
+                
+                # Mask prompt tokens (all tokens up to the end of the templated prompt)
+                # This includes user message, system message (if any), and template tokens for assistant's turn.
+                # Ensure mask_end_idx does not exceed the actual sequence length before padding.
+                mask_end_idx = min(len_prompt_tokens_in_full, current_seq_len)
+                final_labels[:mask_end_idx] = -100
+                
+                # Mask padding tokens (tokens from end of actual sequence to global_max_seq_len_in_batch)
                 if padding_len > 0:
-                    final_labels[-padding_len:] = -100 # Mask padding tokens
+                    final_labels[current_seq_len:] = -100
                 
                 sample_cand_ids.append(final_ids)
                 sample_cand_attn.append(final_attn)
                 sample_cand_labels.append(final_labels)
             
-            # Stack K responses for this sample: (K, global_max_seq_len_in_batch)
-            if not sample_cand_ids and num_responses_per_sample > 0 : # Should not happen if data is consistent
+            if not sample_cand_ids and num_responses_per_sample > 0 :
                 raise ValueError(f"Feature '{prompt_text}' yielded no tokenized responses despite expecting K={num_responses_per_sample}.")
             
-            # If num_responses_per_sample is 0 (e.g. for a best_of_n with no completions), stack will handle empty list if sample_cand_ids is empty
-            batch_candidate_input_ids.append(torch.stack(sample_cand_ids) if sample_cand_ids else torch.empty(0, global_max_seq_len_in_batch, dtype=torch.long) )
-            batch_candidate_attention_mask.append(torch.stack(sample_cand_attn) if sample_cand_attn else torch.empty(0, global_max_seq_len_in_batch, dtype=torch.long))
-            batch_candidate_labels.append(torch.stack(sample_cand_labels) if sample_cand_labels else torch.empty(0, global_max_seq_len_in_batch, dtype=torch.long))
+            # Stack K responses for this sample: (K, global_max_seq_len_in_batch)
+            # Handle cases where num_responses_per_sample might be 0 (e.g., for best_of_n with no completions)
+            if sample_cand_ids:
+                batch_candidate_input_ids.append(torch.stack(sample_cand_ids))
+                batch_candidate_attention_mask.append(torch.stack(sample_cand_attn))
+                batch_candidate_labels.append(torch.stack(sample_cand_labels))
+            elif num_responses_per_sample > 0: # Expected completions but got none tokenized
+                 raise ValueError(f"Logic error or empty tokenization: sample_cand_ids is empty for K={num_responses_per_sample} for prompt: {prompt_text}")
+            else: # K=0, so append empty tensors of the correct shape
+                batch_candidate_input_ids.append(torch.empty(0, global_max_seq_len_in_batch, dtype=torch.long))
+                batch_candidate_attention_mask.append(torch.empty(0, global_max_seq_len_in_batch, dtype=torch.long))
+                batch_candidate_labels.append(torch.empty(0, global_max_seq_len_in_batch, dtype=torch.long))
 
 
             if first_item_type == "best_of_n":
                 batch_chosen_index_in_candidates.append(feature["chosen_idx"])
-                batch_mu_weights_scalar.append(feature.get("mu_weight", 1.0))
+                batch_mu_weights_scalar.append(feature.get("mu_weight", 1.0)) # or prm_avg_scores
             elif first_item_type == "ranked":
-                batch_mu_weights_k_list.append(feature["prm_avg_scores"]) # This is List[float]
+                batch_mu_weights_k_list.append(feature["prm_avg_scores"])
 
-        # Final batch assembly
         batch = {"type": [first_item_type] * len(features)}
         
-        # Stack across batch: (B, K, global_max_seq_len_in_batch)
-        # Handle case where batch_candidate_input_ids might be empty if features was empty or all num_responses_per_sample were 0
-        if batch_candidate_input_ids and all(t.numel() > 0 for t in batch_candidate_input_ids if isinstance(t, torch.Tensor)): # Ensure list is not empty and tensors are not empty
+        if not batch_candidate_input_ids:
+             if num_responses_per_sample > 0 and features : # Only raise if we expected data
+                raise ValueError("Batch candidate input_ids is empty after processing all features. Check data and tokenization.")
+             # If features list was empty or K=0, it's possible to have empty lists here
+             # Create empty tensors with appropriate dimensions for consistency if needed by downstream.
+             # For K > 0 and features present, this indicates a problem.
+             # If K=0, the output tensors will be (B, 0, seq_len)
+             # The stacking below might fail if batch_candidate_input_ids is truly empty and B > 0.
+             # Let's refine the condition for raising error:
+             if features and num_responses_per_sample > 0 :
+                 raise ValueError("No valid candidate input IDs found. Ensure features have valid completions.")
+             elif not features: # No features, return minimal batch
+                 return batch # Or handle as per training loop's expectation for empty batch
+
+        # Ensure all tensors in the list have the same K dimension before stacking for B
+        # This should be guaranteed by the num_responses_per_sample logic earlier
+        # Stacking will create (B, K, global_max_seq_len_in_batch)
+        # If K=0, then it becomes (B, 0, global_max_seq_len_in_batch)
+        try:
             batch['candidate_input_ids'] = torch.stack(batch_candidate_input_ids)
             batch['candidate_attention_mask'] = torch.stack(batch_candidate_attention_mask)
             batch['candidate_labels'] = torch.stack(batch_candidate_labels)
-        else: # Should have K elements if K > 0
-            raise ValueError("No valid candidate input IDs found. Ensure features have valid completions.")
+        except RuntimeError as e:
+            print("RuntimeError during stacking. This often means inconsistent tensor shapes.")
+            for i, t in enumerate(batch_candidate_input_ids): print(f"Shape of input_ids {i}: {t.shape}")
+            for i, t in enumerate(batch_candidate_attention_mask): print(f"Shape of attention_mask {i}: {t.shape}")
+            for i, t in enumerate(batch_candidate_labels): print(f"Shape of labels {i}: {t.shape}")
+            print(f"Expected K (num_responses_per_sample): {num_responses_per_sample}")
+            raise e
+
 
         if first_item_type == "best_of_n":
             batch['chosen_index_in_candidates'] = torch.tensor(batch_chosen_index_in_candidates, dtype=torch.long)
             batch['prm_avg_scores'] = torch.tensor(batch_mu_weights_scalar, dtype=torch.float)
         elif first_item_type == "ranked":
-            if batch_mu_weights_k_list: # List of K-element List[float]
-                # Convert List[List[float]] to (B, K) tensor
-                temp_mu_tensors = [torch.tensor(mu_list, dtype=torch.float) for mu_list in batch_mu_weights_k_list]
-                batch['prm_avg_scores'] = torch.stack(temp_mu_tensors) # (B, K)
-            else: # Should have K elements if K > 0
-                raise ValueError("No valid mu_weights_k found. Ensure features have valid mu_weights_k lists.")
-        
+            if batch_mu_weights_k_list:
+                # Ensure all lists have K elements, pad if necessary (though ideally data is consistent)
+                expected_k = num_responses_per_sample
+                processed_mu_weights = []
+                for mu_list in batch_mu_weights_k_list:
+                    if len(mu_list) != expected_k:
+                        # This case should ideally be an error or handled by padding if permissible
+                        raise ValueError(f"Inconsistent number of mu_weights. Expected {expected_k}, got {len(mu_list)}. Data: {mu_list}")
+                    processed_mu_weights.append(torch.tensor(mu_list, dtype=torch.float))
+                
+                if processed_mu_weights: # if K > 0
+                    batch['prm_avg_scores'] = torch.stack(processed_mu_weights) # (B, K)
+                elif expected_k > 0 : # K>0 but no weights processed, error
+                    raise ValueError("No mu_weights processed for 'ranked' type with K > 0.")
+                else: # K=0
+                    batch['prm_avg_scores'] = torch.empty(len(features), 0, dtype=torch.float)
+
+            elif num_responses_per_sample > 0 : # K > 0 but list is empty
+                 raise ValueError("No valid mu_weights_k found for 'ranked' type with K > 0. Ensure features have valid prm_avg_scores lists.")
+            else: # K=0
+                batch['prm_avg_scores'] = torch.empty(len(features), 0, dtype=torch.float) # (B,0) tensor
+                
         return batch
