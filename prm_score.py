@@ -128,6 +128,8 @@ def main():
     try:
         with accelerator.main_process_first():
              dataset_to_process = load_from_disk(args.input_dataset_path)
+             dataset_to_process = dataset_to_process.shuffle(seed=42)  # Shuffle dataset for better distribution across processes
+            #  dataset_to_process = dataset_to_process.select(range(5000))
     except Exception as e:
         logger.error(f"Failed to load dataset from {args.input_dataset_path}: {e}")
         return

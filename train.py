@@ -137,8 +137,8 @@ if __name__ == "__main__":
     raw_data = [
         {
             "type": "ranked",
-            "prompt": "어떤 영화 좋아하세요?",
-            "responses": [
+            "problem": "어떤 영화 좋아하세요?",
+            "completions": [
                 "액션 영화를 좋아합니다.",
                 "로맨틱 코미디요.",
                 "공상과학 영화를 제일 좋아해요.",
@@ -149,8 +149,8 @@ if __name__ == "__main__":
         },
         {
             "type": "ranked",
-            "prompt": "주말에 뭐할까?",
-            "responses": [
+            "problem": "주말에 뭐할까?",
+            "completions": [
                 "영화 보러 가는 건 어때요?",
                 "친구들이랑 만날까요?",
                 "집에서 쉬는 게 최고죠.",
@@ -161,8 +161,8 @@ if __name__ == "__main__":
         },
         {
             "type": "ranked",
-            "prompt": "좋아하는 음식은?",
-            "responses": [
+            "problem": "좋아하는 음식은?",
+            "completions": [
                 "피자를 좋아해요.",
                 "초밥이 최고죠.",
                 "한식이 그리워요.",
@@ -173,8 +173,8 @@ if __name__ == "__main__":
         },
         {
             "type": "ranked",
-            "prompt": "가장 좋아하는 계절은?",
-            "responses": [
+            "problem": "가장 좋아하는 계절은?",
+            "completions": [
                 "봄이 제일 좋아요.",
                 "가을의 단풍이 멋져요.",
                 "여름의 바다도 좋죠.",

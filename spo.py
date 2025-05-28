@@ -248,8 +248,8 @@ class SPODataCollator:
         # 1. 배치 전체에서 최대 시퀀스 길이 계산
         global_max_seq_len_in_batch = 0
         for feature in features:
-            prompt_text = feature["prompt"]
-            responses_text = feature["responses"]
+            prompt_text = feature["problem"]
+            responses_text = feature["completions"]
             for response_text in responses_text:
                 full_text = prompt_text + response_text
                 # 토큰화하여 실제 길이 확인 (패딩/자르기 전 길이 아님, max_length 적용 후 길이)
@@ -278,8 +278,8 @@ class SPODataCollator:
             batch_mu_weights_k_list = [] # 각 샘플의 mu_weights_k 리스트를 담을 리스트
 
         for feature in features:
-            prompt_text = feature["prompt"]
-            responses_text = feature["responses"]
+            prompt_text = feature["problem"]
+            responses_text = feature["completions"]
 
             prompt_only_ids = self.tokenizer.encode(
                 prompt_text,
