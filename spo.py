@@ -9,164 +9,223 @@ import torch.nn as nn
 import torch.nn.functional as F # _get_log_probs 내에서 F.log_softmax 사용 가정
 from typing import Dict, List # Dict는 batch 타입 어노테이션, List는 mu_weights_k 타입 어노테이션에 사용
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Dict, Optional
+
 class SPOLoss(nn.Module):
-    def __init__(self, alpha: float = 0.001, beta: float = 0.01, reference_model: nn.Module = None):
+    def __init__(self,
+                 alpha: float = 0.01,
+                 beta: float = 0.1,
+                 gamma_score: float = 0.01,
+                 eta_decay: float = 1.0,
+                 mu_scale_factor: float = 1.0,
+                 reference_model: Optional[nn.Module] = None,
+                 use_global_kl: bool = False
+                ):
         super().__init__()
-        if alpha <= 0:
-            raise ValueError("alpha must be greater than 0.")
+        
         self.alpha = alpha
         self.beta = beta
+        self.gamma_score = gamma_score
+        self.eta_decay = eta_decay
+        self.mu_scale_factor = mu_scale_factor
+        self.use_global_kl = use_global_kl
+
         self.reference_model = reference_model
         if self.reference_model is not None:
-            self.reference_model.eval() # 참조 모델은 평가 모드로 설정
+            self.reference_model.eval()
 
-    def _get_log_probs(self, model: nn.Module, input_ids: torch.Tensor, attention_mask: torch.Tensor,
-                       labels: torch.Tensor) -> torch.Tensor:
-        """
-        Helper to get log probabilities of sequences from the model.
-        Assumes `model` returns logits and `labels` are the target sequence (prompt masked).
-        This calculates log_prob(response | prompt)
-        """
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask) # labels=None 명시 안해도 됨
-        logits = outputs.logits # (batch_size_flat, sequence_length, vocab_size)
-
+    def _get_sequence_log_probs_from_logits(self,
+                                            logits: torch.Tensor,
+                                            labels: torch.Tensor
+                                           ) -> torch.Tensor:
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
-        
-        log_probs_all_tokens = F.log_softmax(shift_logits, dim=-1) # (batch_size_flat, sequence_length-1, vocab_size)
-        
-        # Gather the log_probs for the actual next tokens
-        # NLLLoss(log_softmax(inputs), target) 와 동일 효과: -log_probs.gather(dim=2, index=shift_labels.unsqueeze(2)).squeeze(2)
-        # shift_labels이 -100인 부분은 무시되어야 함.
-        
-        loss_fct = nn.NLLLoss(ignore_index=-100, reduction='none') # per-token loss
-        
-        # NLLLoss expects (N, C) and target (N)
-        # log_probs_all_tokens: (batch_flat, seq_len-1, vocab_size) -> (batch_flat * (seq_len-1), vocab_size)
-        # shift_labels: (batch_flat, seq_len-1) -> (batch_flat * (seq_len-1))
+        log_probs_all_tokens = F.log_softmax(shift_logits, dim=-1)
+        loss_fct = nn.NLLLoss(ignore_index=-100, reduction='none')
         per_token_neg_log_likelihood = loss_fct(
-            log_probs_all_tokens.view(-1, log_probs_all_tokens.size(-1)), 
+            log_probs_all_tokens.view(-1, log_probs_all_tokens.size(-1)),
             shift_labels.view(-1)
         )
-        
-        # Reshape back to (batch_flat, seq_len - 1)
-        per_token_neg_log_likelihood = per_token_neg_log_likelihood.view(labels.size(0), labels.size(1) - 1)
-        
-        # Sum of negative log likelihood where labels are not -100
-        # 마스크된 부분(-100)은 NLLLoss에서 0으로 처리되므로, sum은 유효 토큰에 대한 합계가 됨.
-        sequence_log_probs = -per_token_neg_log_likelihood.sum(dim=-1) # (batch_flat,)
-
+        per_token_neg_log_likelihood = per_token_neg_log_likelihood.view(labels.size(0), -1)
+        sequence_log_probs = -per_token_neg_log_likelihood.sum(dim=-1)
         return sequence_log_probs
 
-    def _calculate_base_term(self, chosen_log_prob: torch.Tensor, candidate_log_probs: torch.Tensor) -> torch.Tensor:
-        log_ratio = (chosen_log_prob * self.alpha) - torch.logsumexp(candidate_log_probs * self.alpha, dim=-1)
-        return log_ratio
+    def _calculate_preference_term(self, chosen_log_prob: torch.Tensor, candidates_log_probs: torch.Tensor) -> torch.Tensor:
+        chosen_term = chosen_log_prob * self.alpha
+        sum_candidates_term = torch.logsumexp(candidates_log_probs * self.alpha, dim=-1)
+        return chosen_term - sum_candidates_term
 
-    def ranked_preference_loss(self,
-                               policy_model: nn.Module,
-                               batch: Dict[str, torch.Tensor]
-                               ) -> torch.Tensor:
-        """
-        Calculates the Soft Preference Optimization (SPO) loss for Ranked Preference Data.
-        Includes a simplified DPO-like KL regularization based on the top-ranked response.
-        """
-        candidate_input_ids = batch['candidate_input_ids']    # (batch_size, num_responses, seq_len)
-        candidate_attention_mask = batch['candidate_attention_mask'] # (batch_size, num_responses, seq_len)
-        candidate_labels = batch['candidate_labels']          # <--- 마스킹된 레이블 사용
-        mu_weights_k = batch.get('mu_weights_k', None) # (list of (batch_size,) tensors)
+    def _calculate_mu_k(self,
+                        current_k: int,
+                        scores_for_current_sample_ranked: torch.Tensor, # 1D 텐서
+                        batch_avg_V_term: torch.Tensor
+                       ) -> torch.Tensor:
+        # scores_for_current_sample_ranked가 비어있거나 current_k가 범위를 벗어나는 경우는
+        # 호출하는 쪽(forward)에서 num_responses 검사를 통해 사전에 방지한다고 가정.
+        scores_in_C_k = scores_for_current_sample_ranked[current_k:]
+        
+        # scores_in_C_k가 비어있는 경우는 (current_k == num_responses 일 때), sum_scores_in_C_k는 0이 됨.
+        # 이 경우 V_ik_current도 0이 될 수 있음 (0^gamma_score). 이는 의도된 동작일 수 있음.
+        sum_scores_in_C_k = torch.sum(scores_in_C_k)
+        V_ik_current = sum_scores_in_C_k**self.gamma_score
+        
+        quality_arg = V_ik_current - batch_avg_V_term
+        overall_quality_weight = self.mu_scale_factor * torch.sigmoid(quality_arg)
+        
+        final_mu_k = (self.eta_decay**current_k) * overall_quality_weight
+        return final_mu_k
+
+    def _calculate_tokenwise_kl_on_sequences(self,
+                                             policy_logits: torch.Tensor,
+                                             input_ids: torch.Tensor,
+                                             attention_mask: torch.Tensor,
+                                             labels: torch.Tensor
+                                            ) -> torch.Tensor:
+        # self.reference_model이 None인 경우는 forward에서 beta > 0일 때 미리 체크함.
+        with torch.no_grad():
+            ref_outputs = self.reference_model(input_ids=input_ids, attention_mask=attention_mask) # type: ignore
+            ref_logits = ref_outputs.logits
+
+        ref_log_probs = F.log_softmax(ref_logits[:, :-1, :], dim=-1)
+        policy_log_probs = F.log_softmax(policy_logits[:, :-1, :], dim=-1)
+        
+        shifted_labels = labels[:, 1:].contiguous()
+        valid_token_mask = (shifted_labels != -100)
+
+        kl_div_per_token_position = F.kl_div(
+            input=ref_log_probs, target=policy_log_probs, reduction='none', log_target=True
+        ).sum(dim=-1)
+        
+        masked_kl_div = kl_div_per_token_position * valid_token_mask
+        sequence_kl_sum = masked_kl_div.sum(dim=-1)
+        
+        num_valid_tokens_per_sequence = valid_token_mask.sum(dim=-1).float()
+        # 0으로 나누는 것 방지: num_valid_tokens_per_sequence가 0이면 KL도 0이 되도록 함
+        # (masked_kl_div.sum도 0이므로 결과적으로 0/0 -> nan 대신 0이 됨)
+        avg_kl_per_sequence = torch.where(
+            num_valid_tokens_per_sequence > 0,
+            sequence_kl_sum / (num_valid_tokens_per_sequence + 1e-8), # 작은 값 더해서 0으로 나누기 방지
+            torch.zeros_like(sequence_kl_sum)
+        )
+        return avg_kl_per_sequence.mean() if avg_kl_per_sequence.nelement() > 0 else torch.tensor(0.0, device=policy_logits.device)
+
+
+    def forward(self,
+                policy_model: nn.Module,
+                batch: Dict[str, torch.Tensor]
+               ) -> torch.Tensor:
+        
+        candidate_input_ids = batch.get('candidate_input_ids')
+        candidate_attention_mask = batch.get('candidate_attention_mask')
+        candidate_labels = batch.get('candidate_labels')
+        external_scores_ranked = batch.get('prm_avg_scores')
+
+        if any(t is None for t in [candidate_input_ids, candidate_attention_mask, candidate_labels, external_scores_ranked]):
+            raise KeyError("One or more required keys ('candidate_input_ids', 'candidate_attention_mask', "
+                           "'candidate_labels', 'external_scores_ranked') are missing from the batch.")
 
         batch_size, num_responses, seq_len = candidate_input_ids.shape
+        device = candidate_input_ids.device
 
-        # 모든 후보를 평탄화 (batch_size * num_responses, seq_len)
-        all_candidate_input_ids_flat = candidate_input_ids.view(-1, seq_len)
-        all_candidate_attention_mask_flat = candidate_attention_mask.view(-1, seq_len)
-        all_candidate_labels_flat = candidate_labels.view(-1, seq_len) # <--- 마스킹된 레이블 평탄화
+        if num_responses == 0: # 응답이 없는 경우 손실 0 반환 또는 에러
+            return torch.tensor(0.0, device=device, requires_grad=True) # 학습 가능하도록
 
-        # 정책 모델의 모든 후보에 대한 로그 확률 계산
-        all_response_log_probs_policy_flat = self._get_log_probs(
-            policy_model,
-            all_candidate_input_ids_flat,
-            all_candidate_attention_mask_flat,
-            all_candidate_labels_flat  # <--- 마스킹된 레이블 전달
+        flat_input_ids = candidate_input_ids.reshape(-1, seq_len)
+        flat_attention_mask = candidate_attention_mask.reshape(-1, seq_len)
+        flat_labels = candidate_labels.reshape(-1, seq_len)
+
+        policy_outputs = policy_model(input_ids=flat_input_ids, attention_mask=flat_attention_mask, labels=flat_labels)
+        policy_logits_flat = policy_outputs.logits
+        
+        all_response_log_probs_policy_flat = self._get_sequence_log_probs_from_logits(
+            policy_logits_flat, flat_labels
         )
-        # (batch_size, num_responses) 형태로 복원
         all_response_log_probs_policy = all_response_log_probs_policy_flat.view(batch_size, num_responses)
 
-        # (선택 사항) 참조 모델의 모든 후보에 대한 로그 확률 계산 (KL 정규화용)
-        all_response_log_probs_ref = None
-        if self.reference_model is not None:
-            with torch.no_grad():
-                all_response_log_probs_ref_flat = self._get_log_probs(
-                    self.reference_model,
-                    all_candidate_input_ids_flat,
-                    all_candidate_attention_mask_flat,
-                    all_candidate_labels_flat  # <--- 마스킹된 레이블 전달
-                )
-            # (batch_size, num_responses) 형태로 복원
-            all_response_log_probs_ref = all_response_log_probs_ref_flat.view(batch_size, num_responses)
-
-        batch_total_spo_loss = 0.0
-        batch_total_kl_term = 0.0
-
-        for i in range(batch_size): # 각 배치 샘플에 대해 반복
-            sample_spo_loss = 0.0
-            current_sample_log_probs_policy = all_response_log_probs_policy[i] # (num_responses,) 현재 샘플의 정책 로그 확률
-
-            # SPO 핵심 항 계산 (Plackett-Luce 기반)
-            for k in range(num_responses - 1):  # k는 0부터 n-2까지 (n-1개의 항)
-                # y_tau(k): k번째 순위 응답의 원래 인덱스 및 해당 로그 확률
-                chosen_for_k_log_prob = current_sample_log_probs_policy[k] # y_tau(k)의 로그 확률
-                # 분모에 사용될 후보군: y_tau(k) 부터 y_tau(n-1) 까지의 응답들
-                # 해당 응답들의 로그 확률
-                candidates_for_denominator_k_log_probs = current_sample_log_probs_policy.gather(
-                    dim=0, index=torch.tensor(list(range(k + 1, num_responses)))
-                ) # (num_responses - k,)
-
-                term_k = - (1 / self.alpha) * self._calculate_base_term(
-                    chosen_for_k_log_prob,
-                    candidates_for_denominator_k_log_probs
-                )
-
-                # mu_k 가중치 적용 (선택 사항)
-                if mu_weights_k is not None:
-                    # current_ranked_original_idx가 mu_weights_k 리스트의 유효한 인덱스인지 확인
-                    if current_ranked_original_idx < len(mu_weights_k) and \
-                        mu_weights_k[current_ranked_original_idx] is not None:
-                        # 샘플 인덱스 i가 해당 텐서에 유효한지 확인
-                        if i < mu_weights_k[current_ranked_original_idx].size(0):
-                            # k번째 순위를 차지한 아이템의 '고유 가중치'를 가져옴
-                            inherent_weight_of_chosen_item = mu_weights_k[current_ranked_original_idx][i]
-                            term_k *= inherent_weight_of_chosen_item
-
-
-                sample_spo_loss += term_k
+        # mu_k 계산을 위한 batch_avg_V_term 계산
+        batch_avg_V_term = torch.tensor(0.0, device=device)
+        if num_responses > 0 : # V_term 계산은 응답이 있을 때만 의미 있음
+            all_V_values_in_batch_for_mu = []
+            for i in range(batch_size):
+                current_sample_scores_ranked = external_scores_ranked[i]
+                for k_loop_prep in range(num_responses):
+                    scores_in_C_k_prep = current_sample_scores_ranked[k_loop_prep:]
+                    # scores_in_C_k_prep가 비어있지 않음을 보장 (k_loop_prep < num_responses 이므로)
+                    sum_scores_in_C_k_prep = torch.sum(scores_in_C_k_prep)
+                    V_ik_prep = sum_scores_in_C_k_prep**self.gamma_score
+                    all_V_values_in_batch_for_mu.append(V_ik_prep)
             
-            batch_total_spo_loss += sample_spo_loss
-
-            # KL 정규화 항 계산 (최상위 순위 응답 기반)
-            if self.reference_model is not None and all_response_log_probs_ref is not None:
-                current_sample_log_probs_ref = all_response_log_probs_ref[i] # (num_responses,) 현재 샘플의 참조 로그 확률
-
-                # 최상위 순위 응답 (y_tau(0))
-                top_ranked_original_idx = current_sample_ranked_indices[0]
-                
-                top_ranked_log_prob_policy = current_sample_log_probs_policy[top_ranked_original_idx]
-                top_ranked_log_prob_ref = current_sample_log_probs_ref[top_ranked_original_idx]
-                
-                kl_term_sample = self.beta * (top_ranked_log_prob_policy - top_ranked_log_prob_ref)
-                batch_total_kl_term += kl_term_sample
+            if len(all_V_values_in_batch_for_mu) > 0:
+                batch_avg_V_term = torch.mean(torch.stack(all_V_values_in_batch_for_mu))
         
-        # 배치 전체에 대한 평균 손실
-        final_spo_loss = batch_total_spo_loss / batch_size
+        # 선호도 손실 계산
+        total_preference_loss_terms = []
+        if num_responses > 1: # 비교할 쌍이 있는 경우에만 계산
+            for i in range(batch_size):
+                current_sample_log_probs_policy_ranked = all_response_log_probs_policy[i]
+                current_sample_scores_ranked = external_scores_ranked[i]
+
+                for k in range(num_responses - 1):
+                    chosen_log_prob = current_sample_log_probs_policy_ranked[k]
+                    candidates_denominator_log_probs = current_sample_log_probs_policy_ranked[k:]
+                    
+                    term_k_log_ratio = self._calculate_preference_term(
+                        chosen_log_prob,
+                        candidates_denominator_log_probs
+                    )
+                    mu_k = self._calculate_mu_k(
+                        k, current_sample_scores_ranked, batch_avg_V_term
+                    )
+                    term_k = -(1.0 / self.alpha) * term_k_log_ratio * mu_k
+                    total_preference_loss_terms.append(term_k)
         
-        if self.reference_model is not None:
-            final_kl_term = batch_total_kl_term / batch_size
-            total_loss = final_spo_loss + final_kl_term
-        else:
-            total_loss = final_spo_loss
+        if len(total_preference_loss_terms) > 0:
+            # 각 term_k는 스칼라이므로, stack 후 mean 또는 sum / count
+            final_preference_loss = torch.mean(torch.stack(total_preference_loss_terms))
+        else: # num_responses <= 1 이거나 batch_size = 0
+            final_preference_loss = torch.tensor(0.0, device=device)
+        
+        # KL 발산 손실 계산
+        kl_divergence_loss = torch.tensor(0.0, device=device)
+        if self.beta > 0:
+            if self.reference_model is None:
+                raise ValueError("reference_model is required for KL divergence calculation when beta > 0.")
+
+            kl_input_ids, kl_attn_mask, kl_labels, kl_policy_logits = None, None, None, None
+            kl_data_available = False
+
+            if self.use_global_kl:
+                if not all(key in batch for key in ['online_input_ids', 'online_attention_mask', 'online_labels']):
+                    raise KeyError("Global KL divergence requires 'online_input_ids', 'online_attention_mask', "
+                                   "and 'online_labels' in batch when use_global_kl is True.")
+                
+                online_input_ids = batch['online_input_ids']
+                if online_input_ids.nelement() > 0:
+                    online_policy_outputs = policy_model(
+                        input_ids=online_input_ids,
+                        attention_mask=batch['online_attention_mask'],
+                        labels=batch['online_labels']
+                    )
+                    kl_input_ids, kl_attn_mask, kl_labels, kl_policy_logits = \
+                        online_input_ids, batch['online_attention_mask'], batch['online_labels'], online_policy_outputs.logits
+                    kl_data_available = True
+            else: # 데이터셋 내 KL
+                if flat_input_ids.nelement() > 0:
+                    kl_input_ids, kl_attn_mask, kl_labels, kl_policy_logits = \
+                        flat_input_ids, flat_attention_mask, flat_labels, policy_logits_flat
+                    kl_data_available = True
             
+            if kl_data_available:
+                kl_divergence_loss = self._calculate_tokenwise_kl_on_sequences(
+                    kl_policy_logits, kl_input_ids, kl_attn_mask, kl_labels
+                )
+        
+        total_loss = final_preference_loss + self.beta * kl_divergence_loss
         return total_loss
-
+    
 # --- 2. Custom Trainer Class (compute_loss 수정) ---
 class CustomSPOTrainer(Trainer):
     def __init__(self, spo_loss_fn: SPOLoss, *args, **kwargs):
@@ -180,7 +239,7 @@ class CustomSPOTrainer(Trainer):
         loss_type = inputs['type'][0] 
 
         if loss_type == "ranked":
-            loss = self.spo_loss_fn.ranked_preference_loss(model, inputs)
+            loss = self.spo_loss_fn.forward(model, inputs)
         else:
             raise ValueError(f"Unknown loss type: {loss_type}")
 
@@ -195,9 +254,10 @@ from typing import List, Dict, Any # 최상단에 이미 있을 수 있음
 
 # --- SPODataCollator 수정 ---
 class SPODataCollator:
-    def __init__(self, tokenizer, max_length: int = 512):
+    def __init__(self, tokenizer,instruction, max_length: int = 512):
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.instruction = instruction
 
         if self.tokenizer.pad_token is None:
             if self.tokenizer.eos_token is not None:
@@ -246,7 +306,7 @@ class SPODataCollator:
                 raise ValueError(f"Data inconsistency: Feature '{feature.get('problem','N/A')}' has {len(responses_text)} completions, expected {num_responses_per_sample}.")
 
             for response_text in responses_text:
-                full_text = prompt_text + " " + response_text # Simple concatenation
+                full_text = self.instruction +prompt_text + " " + response_text # Simple concatenation
                 full_tokens = self.tokenizer(
                     full_text,
                     max_length=self.max_length,
@@ -265,7 +325,6 @@ class SPODataCollator:
             batch_chosen_index_in_candidates = []
             batch_mu_weights_scalar = []
         elif first_item_type == "ranked":
-            batch_ranked_indices = []
             batch_mu_weights_k_list = [] # Stores List[float] for each sample
 
         for feature in features:
@@ -322,7 +381,7 @@ class SPODataCollator:
                 batch_chosen_index_in_candidates.append(feature["chosen_idx"])
                 batch_mu_weights_scalar.append(feature.get("mu_weight", 1.0))
             elif first_item_type == "ranked":
-                batch_mu_weights_k_list.append(feature["mu_weights_k"]) # This is List[float]
+                batch_mu_weights_k_list.append(feature["prm_avg_scores"]) # This is List[float]
 
         # Final batch assembly
         batch = {"type": [first_item_type] * len(features)}
@@ -338,12 +397,12 @@ class SPODataCollator:
 
         if first_item_type == "best_of_n":
             batch['chosen_index_in_candidates'] = torch.tensor(batch_chosen_index_in_candidates, dtype=torch.long)
-            batch['mu_weights'] = torch.tensor(batch_mu_weights_scalar, dtype=torch.float)
+            batch['prm_avg_scores'] = torch.tensor(batch_mu_weights_scalar, dtype=torch.float)
         elif first_item_type == "ranked":
             if batch_mu_weights_k_list: # List of K-element List[float]
                 # Convert List[List[float]] to (B, K) tensor
                 temp_mu_tensors = [torch.tensor(mu_list, dtype=torch.float) for mu_list in batch_mu_weights_k_list]
-                batch['mu_weights_k'] = torch.stack(temp_mu_tensors) # (B, K)
+                batch['prm_avg_scores'] = torch.stack(temp_mu_tensors) # (B, K)
             else: # Should have K elements if K > 0
                 raise ValueError("No valid mu_weights_k found. Ensure features have valid mu_weights_k lists.")
         

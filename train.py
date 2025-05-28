@@ -2,7 +2,7 @@ import torch
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl, Trainer
-from datasets import Dataset
+from datasets import Dataset, load_from_disk
 from peft import LoraConfig, get_peft_model, TaskType
 
 import logging
@@ -81,7 +81,8 @@ class MetricsLoggingCallback(TrainerCallback):
                 
 def parse_args():
     parser = argparse.ArgumentParser(description="SPO Training Script")
-    parser.add_argument("--exp_name", type=str, default="spo_test", help="Experiment name for output directory")
+    parser.add_argument("--exp_name", type=str, default="spo_math", help="Experiment name for output directory")
+    parser.add_argument("--dataset_path", type=str, default="./results/MATH_w_cot_parsed_filter_5_scored_N10_sorted", help="Path to the SPO dataset")
     parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate for training")
     return parser.parse_args()
@@ -133,62 +134,9 @@ if __name__ == "__main__":
     model.print_trainable_parameters()
     # --- LoRA 설정 끝 ---
 
-    # 2. 데이터셋 생성 (새로운 형식)
-    raw_data = [
-        {
-            "type": "ranked",
-            "problem": "어떤 영화 좋아하세요?",
-            "completions": [
-                "액션 영화를 좋아합니다.",
-                "로맨틱 코미디요.",
-                "공상과학 영화를 제일 좋아해요.",
-                "코미디 영화를 선호합니다."
-            ],
-            "ranked_indices": [2, 0, 3, 1], # responses[2] > responses[0] > responses[3] > responses[1]
-            "mu_weights_k": [0.6, 0.9, 0.5, 0.8]
-        },
-        {
-            "type": "ranked",
-            "problem": "주말에 뭐할까?",
-            "completions": [
-                "영화 보러 가는 건 어때요?",
-                "친구들이랑 만날까요?",
-                "집에서 쉬는 게 최고죠.",
-                "여행 계획을 세워볼까요?"
-            ],
-            "ranked_indices": [0, 3, 1, 2], # responses[0] > responses[3] > responses[1] > responses[2]
-            "mu_weights_k": [1.0, 0.4, 0.9, 0.6]
-        },
-        {
-            "type": "ranked",
-            "problem": "좋아하는 음식은?",
-            "completions": [
-                "피자를 좋아해요.",
-                "초밥이 최고죠.",
-                "한식이 그리워요.",
-                "중식도 좋아합니다."
-            ],
-            "ranked_indices": [1, 0, 3, 2], # responses[1] > responses[0] > responses[3] > responses[2]
-            "mu_weights_k": [0.7, 1.0, 0.4, 0.5]
-        },
-        {
-            "type": "ranked",
-            "problem": "가장 좋아하는 계절은?",
-            "completions": [
-                "봄이 제일 좋아요.",
-                "가을의 단풍이 멋져요.",
-                "여름의 바다도 좋죠.",
-                "겨울의 눈도 아름답습니다."
-            ],
-            "ranked_indices": [0, 1, 2, 3], # responses[0] > responses[1] > responses[2] > responses[3]
-            "mu_weights_k": [1.0, 0.8, 0.5, 0.2]
-        },
-        
-    ]
-
     # 데이터셋 인스턴스 생성
-    train_dataset = Dataset.from_list(raw_data)  # Dataset.from_list로 변환
-    data_collator = SPODataCollator(tokenizer, max_length=128)
+    train_dataset = load_from_disk(args.dataset_path)  # 데이터셋 경로에서 로드
+    data_collator = SPODataCollator(tokenizer, max_length=3072)
 
     # 3. SPO Loss 함수 인스턴스 생성
     spo_loss_fn = SPOLoss(alpha=0.5, beta=0.1, reference_model=ref_model)
