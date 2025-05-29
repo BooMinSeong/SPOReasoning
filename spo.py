@@ -8,20 +8,23 @@ class SPOLoss(nn.Module):
     def __init__(self,
                  alpha: float = 0.01,
                  beta: float = 0.1,
-                 gamma_score: float = 0.01,
+                 gamma: float = 0.01,
                  eta_decay: float = 1.0,
                  mu_scale_factor: float = 2.0,
                  reference_model: Optional[nn.Module] = None,
-                 use_global_kl: bool = False
+                 use_global_kl: bool = False,
+                 use_spo_mu: bool = False,
                 ):
         super().__init__()
         
         self.alpha = alpha
         self.beta = beta
-        self.gamma_score = gamma_score
+        self.gamma = gamma
         self.eta_decay = eta_decay
         self.mu_scale_factor = mu_scale_factor
         self.use_global_kl = use_global_kl
+        self.mu_inner_factor = 0.8
+        self.use_spo_mu = use_spo_mu
 
         self.reference_model = reference_model
         if self.reference_model is not None:
@@ -54,7 +57,7 @@ class SPOLoss(nn.Module):
     #                    ) -> torch.Tensor:
     #     scores_in_C_k = scores_for_current_sample_ranked[current_k:]
     #     sum_scores_in_C_k = torch.sum(scores_in_C_k)
-    #     V_ik_current = sum_scores_in_C_k**self.gamma_score
+    #     V_ik_current = sum_scores_in_C_k**self.gamma
         
     #     # V_ik_current를 현재 샘플의 평균 V값과 비교
     #     impact_score = V_ik_current - torch.mean(sum_scores_in_C_k) # 변경된 인자 이름 사용
@@ -70,12 +73,26 @@ class SPOLoss(nn.Module):
                        ) -> torch.Tensor:
         scores_in_C_k = scores_for_current_sample_ranked[current_k:]
         sum_scores_in_C_k = torch.sum(scores_in_C_k)
-        impact_score = sum_scores_in_C_k**self.gamma_score
+        # V_ik_current를 현재 샘플의 평균 V값과 비교
+        impact_score = self.mu_inner_factor*(sum_scores_in_C_k**self.gamma)
         overall_quality_weight = self.mu_scale_factor * torch.sigmoid(impact_score)
         
         final_mu_k = (self.eta_decay**current_k) * overall_quality_weight
         return final_mu_k
-
+    
+    def _calculate_mu_k_spo(self,
+                        current_k: int,
+                        scores_for_current_sample_ranked: torch.Tensor, 
+                       ) -> torch.Tensor:
+        scores_in_C_k = scores_for_current_sample_ranked[current_k:]
+        scores_in_C_k = torch.exp(scores_in_C_k)  # Exponentiate to get actual scores
+        sum_scores_in_C_k = torch.sum(scores_in_C_k)
+        # V_ik_current를 현재 샘플의 평균 V값과 비교
+        impact_score = self.mu_inner_factor*(sum_scores_in_C_k**self.gamma)
+        overall_quality_weight = self.mu_scale_factor * torch.sigmoid(impact_score)
+        
+        final_mu_k = (self.eta_decay**current_k) * overall_quality_weight
+        return final_mu_k
 
     def _calculate_tokenwise_kl_on_sequences(self,
                                              policy_logits: torch.Tensor,
@@ -163,14 +180,19 @@ class SPOLoss(nn.Module):
                         chosen_log_prob,
                         candidates_denominator_log_probs
                     )
-                    mu_k = self._calculate_mu_k(
-                        k, current_sample_log_probs_policy_ranked
-                        # k, current_sample_scores_ranked
-                    )
+                    if self.use_spo_mu:
+                        mu_k = self._calculate_mu_k_spo(
+                            k, current_sample_log_probs_policy_ranked
+                            # k, current_sample_scores_ranked
+                        )
+                    else:
+                        mu_k = self._calculate_mu_k(
+                            # k, current_sample_log_probs_policy_ranked
+                            k, current_sample_scores_ranked
+                        )
                     print(f"::: mu_k for sample {i}, k={k}: {mu_k.item()}")
                     term_k = -(1.0 / self.alpha) * term_k_log_ratio * mu_k
                     total_preference_loss_terms.append(term_k)
-        print("total_preference_loss_terms : ", total_preference_loss_terms)
         
         if len(total_preference_loss_terms) > 0:
             # 각 term_k는 스칼라이므로, stack 후 mean 또는 sum / count

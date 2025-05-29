@@ -86,7 +86,9 @@ def parse_args():
     parser.add_argument("--alpha", type=float, default=0.01, help="Alpha parameter for SPO loss")
     parser.add_argument("--beta", type=float, default=0.1, help="Beta parameter for SPO loss")
     parser.add_argument("--gamma", type=float, default=0.01, help="Gamma parameter for SPO loss")
-    parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--mu_scale_factor", type=float, default = 2.0,)
+    parser.add_argument("--use_spo_mu", action="store_true", help="Use SPO mu in loss")
+    parser.add_argument("--num_epochs", type=int, default=4, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate for training")
     parser.add_argument("--per_device_train_batch_size", type=int, default=1, help="Batch size per device for training")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=16, help="Number of gradient accumulation steps")
@@ -145,7 +147,14 @@ if __name__ == "__main__":
     data_collator = SPODataCollator(tokenizer, instruction = instruction, max_length=1024)
 
     # 3. SPO Loss 함수 인스턴스 생성
-    spo_loss_fn = SPOLoss(alpha=args.alpha, beta=args.beta, gamma_score = args.gamma, reference_model=ref_model)
+    spo_loss_fn = SPOLoss(
+        alpha=args.alpha,
+        beta=args.beta,
+        gamma = args.gamma,
+        mu_scale_factor = args.mu_scale_factor, 
+        use_spo_mu=args.use_spo_mu,
+        reference_model=ref_model,
+        )
     metrics_callback = MetricsLoggingCallback()
     # 4. TrainingArguments 설정
     training_args = TrainingArguments(
