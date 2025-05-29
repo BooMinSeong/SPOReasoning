@@ -29,13 +29,12 @@ def match_answers(
 ) -> Dict[str, List[bool]]:
     is_correct = []
     parsed_answers_list = x.get("completion_parsed_answers")
-    correct_responses_list = x.get("input_correct_responses")
+    correct_response = x.get("answer")
 
     if isinstance(parsed_answers_list, list) and \
-       isinstance(correct_responses_list, list) and \
-       correct_responses_list:  # 정답 리스트가 비어있지 않은지 확인
+       correct_response:  # 정답 리스트가 비어있지 않은지 확인
 
-        correct_target = correct_responses_list[0]  # 첫 번째 정답을 기준으로 비교
+        correct_target = correct_response  # 첫 번째 정답을 기준으로 비교
         for parsed_answer in parsed_answers_list:
             if math_equal(parsed_answer, correct_target):
                 is_correct.append(True)

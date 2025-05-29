@@ -2,7 +2,7 @@
 import os
 import logging
 import torch
-from datasets import load_from_disk
+from datasets import load_from_disk, load_dataset
 from vllm import LLM
 from score import score
 from argparse import ArgumentParser
@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 def args_parser():
     parser = ArgumentParser(description="LLM Inference")
+    parser.add_argument("--model_path", type=str, default="meta-llama/Llama-3.2-1B-Instruct",)
     parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for sampling")
     parser.add_argument("--num_return_sequences", type=int, default=10, help="Number of sequences to return")
     parser.add_argument("--max_tokens", type=int, default=2048, help="Maximum number of tokens to generate")
@@ -23,12 +24,11 @@ def main():
     args = args_parser()
     
     logger.info(f"Inf Start")
-    dataset_save_name = f"MATH_testset_t1_n{args.num_return_sequences}"
+    dataset_save_name = f"MATH_testset_t{args.temperature}_n{args.num_return_sequences}"
     
     # load for full test
-    dataset = load_from_disk("MATH_local")
-    dataset = dataset['test']
-
+    dataset = load_dataset("HuggingFaceH4/MATH-500",split="test")
+    
     logger.info("load dataset!!")
 
 
@@ -37,8 +37,8 @@ def main():
 
     # GPU 개수를 확인하고, LLM 인스턴스 생성
     num_gpus = torch.cuda.device_count()
-    model_name = "meta-llama/Llama-3.2-1B-Instruct"
-    save_path = os.path.join("results",model_name.split("/")[-1], dataset_save_name)
+    model_name = args.model_path
+    save_path = os.path.join("results",'datas',model_name.split("/")[-2],model_name.split("/")[-1], dataset_save_name)
 
     instrcut_model = True if "Instruct" in model_name else False
     logger.info(f"instruct model: {instrcut_model}")
