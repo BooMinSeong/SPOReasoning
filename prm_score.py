@@ -199,9 +199,10 @@ def main():
                 final_dataset = HFDataset.from_list(final_data_list)
                 logger.info(f"Final dataset reconstructed. Total samples: {len(final_dataset)}")
 
-                slug = args.input_dataset_path.split('/')[-1]
-                out_name = f"{slug}_scored_N{args.num_n_label}"
-                out_dir = os.path.join(args.output_dir, out_name)
+                slug = os.path.basename(args.input_dataset_path) 
+                out_name = f"{slug}_scored"
+                input_dir = os.path.dirname(args.input_dataset_path)
+                out_dir = os.path.join(input_dir, out_name)
                 os.makedirs(args.output_dir, exist_ok=True)
                 
                 logger.info(f"Saving scored dataset to: {out_dir}")
