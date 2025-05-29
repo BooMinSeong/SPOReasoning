@@ -169,8 +169,8 @@ if __name__ == "__main__":
         logging_steps=2,
         # eval_strategy="steps",     # Evaluate every `eval_steps`
         # eval_steps=100,                   # Example: Evaluate every 50 steps
-        save_strategy="steps",           # Save checkpoint every `save_steps`
-        save_steps=20,                   # Example: Save every 50 steps
+        save_strategy="epoch",           # Save checkpoint every `save_steps`
+        # save_steps=20,                   # Example: Save every 50 steps
         remove_unused_columns=False,  # Important for DataCollatorForChatML
         bf16=True,                # Enable mixed precision training
         # Add other arguments like learning_rate, gradient_accumulation_steps etc. as needed
