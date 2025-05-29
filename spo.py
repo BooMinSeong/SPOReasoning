@@ -1,18 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Dict, Union, Any, Optional
+from typing import List, Dict, Any, Optional
 from transformers import Trainer, AutoTokenizer, AutoModelForCausalLM
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F # _get_log_probs 내에서 F.log_softmax 사용 가정
-from typing import Dict, List # Dict는 batch 타입 어노테이션, List는 mu_weights_k 타입 어노테이션에 사용
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, Optional
 
 class SPOLoss(nn.Module):
     def __init__(self,
@@ -20,7 +10,7 @@ class SPOLoss(nn.Module):
                  beta: float = 0.1,
                  gamma_score: float = 0.01,
                  eta_decay: float = 1.0,
-                 mu_scale_factor: float = 1.0,
+                 mu_scale_factor: float = 2.0,
                  reference_model: Optional[nn.Module] = None,
                  use_global_kl: bool = False
                 ):
@@ -58,25 +48,34 @@ class SPOLoss(nn.Module):
         sum_candidates_term = torch.logsumexp(candidates_log_probs * self.alpha, dim=-1)
         return chosen_term - sum_candidates_term
 
+    # def _calculate_mu_k(self,
+    #                     current_k: int,
+    #                     scores_for_current_sample_ranked: torch.Tensor, 
+    #                    ) -> torch.Tensor:
+    #     scores_in_C_k = scores_for_current_sample_ranked[current_k:]
+    #     sum_scores_in_C_k = torch.sum(scores_in_C_k)
+    #     V_ik_current = sum_scores_in_C_k**self.gamma_score
+        
+    #     # V_ik_current를 현재 샘플의 평균 V값과 비교
+    #     impact_score = V_ik_current - torch.mean(sum_scores_in_C_k) # 변경된 인자 이름 사용
+    #     overall_quality_weight = self.mu_scale_factor * torch.sigmoid(impact_score)
+        
+    #     final_mu_k = (self.eta_decay**current_k) * overall_quality_weight
+    #     return final_mu_k
+    
+    # simple version
     def _calculate_mu_k(self,
                         current_k: int,
-                        scores_for_current_sample_ranked: torch.Tensor, # 1D 텐서
-                        batch_avg_V_term: torch.Tensor
+                        scores_for_current_sample_ranked: torch.Tensor, 
                        ) -> torch.Tensor:
-        # scores_for_current_sample_ranked가 비어있거나 current_k가 범위를 벗어나는 경우는
-        # 호출하는 쪽(forward)에서 num_responses 검사를 통해 사전에 방지한다고 가정.
         scores_in_C_k = scores_for_current_sample_ranked[current_k:]
-        
-        # scores_in_C_k가 비어있는 경우는 (current_k == num_responses 일 때), sum_scores_in_C_k는 0이 됨.
-        # 이 경우 V_ik_current도 0이 될 수 있음 (0^gamma_score). 이는 의도된 동작일 수 있음.
         sum_scores_in_C_k = torch.sum(scores_in_C_k)
-        V_ik_current = sum_scores_in_C_k**self.gamma_score
-        
-        quality_arg = V_ik_current - batch_avg_V_term
-        overall_quality_weight = self.mu_scale_factor * torch.sigmoid(quality_arg)
+        impact_score = sum_scores_in_C_k**self.gamma_score
+        overall_quality_weight = self.mu_scale_factor * torch.sigmoid(impact_score)
         
         final_mu_k = (self.eta_decay**current_k) * overall_quality_weight
         return final_mu_k
+
 
     def _calculate_tokenwise_kl_on_sequences(self,
                                              policy_logits: torch.Tensor,
@@ -120,7 +119,7 @@ class SPOLoss(nn.Module):
     def forward(self,
                 policy_model: nn.Module,
                 batch: Dict[str, torch.Tensor]
-               ) -> torch.Tensor:
+               ):
         
         candidate_input_ids = batch.get('candidate_input_ids')
         candidate_attention_mask = batch.get('candidate_attention_mask')
@@ -149,22 +148,6 @@ class SPOLoss(nn.Module):
         )
         all_response_log_probs_policy = all_response_log_probs_policy_flat.view(batch_size, num_responses)
 
-        # mu_k 계산을 위한 batch_avg_V_term 계산
-        batch_avg_V_term = torch.tensor(0.0, device=device)
-        if num_responses > 0 : # V_term 계산은 응답이 있을 때만 의미 있음
-            all_V_values_in_batch_for_mu = []
-            for i in range(batch_size):
-                current_sample_scores_ranked = external_scores_ranked[i]
-                for k_loop_prep in range(num_responses):
-                    scores_in_C_k_prep = current_sample_scores_ranked[k_loop_prep:]
-                    # scores_in_C_k_prep가 비어있지 않음을 보장 (k_loop_prep < num_responses 이므로)
-                    sum_scores_in_C_k_prep = torch.sum(scores_in_C_k_prep)
-                    V_ik_prep = sum_scores_in_C_k_prep**self.gamma_score
-                    all_V_values_in_batch_for_mu.append(V_ik_prep)
-            
-            if len(all_V_values_in_batch_for_mu) > 0:
-                batch_avg_V_term = torch.mean(torch.stack(all_V_values_in_batch_for_mu))
-        
         # 선호도 손실 계산
         total_preference_loss_terms = []
         if num_responses > 1: # 비교할 쌍이 있는 경우에만 계산
@@ -181,10 +164,13 @@ class SPOLoss(nn.Module):
                         candidates_denominator_log_probs
                     )
                     mu_k = self._calculate_mu_k(
-                        k, current_sample_scores_ranked, batch_avg_V_term
+                        k, current_sample_log_probs_policy_ranked
+                        # k, current_sample_scores_ranked
                     )
+                    print(f"::: mu_k for sample {i}, k={k}: {mu_k.item()}")
                     term_k = -(1.0 / self.alpha) * term_k_log_ratio * mu_k
                     total_preference_loss_terms.append(term_k)
+        print("total_preference_loss_terms : ", total_preference_loss_terms)
         
         if len(total_preference_loss_terms) > 0:
             # 각 term_k는 스칼라이므로, stack 후 mean 또는 sum / count
@@ -231,8 +217,7 @@ class SPOLoss(nn.Module):
         # 디버깅을 위해 각 손실 요소 출력
         print(f"Final Preference Loss: {final_preference_loss.item()}")
         print(f"KL Divergence Loss (raw): {kl_divergence_loss.item()}")
-        print(f"Beta * KL Divergence Loss: {(self.beta * kl_divergence_loss).item()}")
-        print(f"Total Loss: {total_loss.item()}")
+
         return total_loss
     
 # --- 2. Custom Trainer Class (compute_loss 수정) ---
@@ -241,13 +226,14 @@ class CustomSPOTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.spo_loss_fn = spo_loss_fn
 
+
     # compute_loss 메서드 시그니처 수정
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None): # <-- num_items_in_batch 추가
         model.train()
 
 
         loss = self.spo_loss_fn.forward(model, inputs)
-        loss = loss/ num_items_in_batch if num_items_in_batch is not None else loss
+        loss = loss/self.args.gradient_accumulation_steps
 
         return (loss, None) if return_outputs else loss
 

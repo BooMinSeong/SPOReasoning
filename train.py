@@ -155,7 +155,7 @@ if __name__ == "__main__":
         # per_device_eval_batch_size=1,    # Example: Set batch size for evaluation
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,          # Example: Set learning rate
-        warmup_ratio=0.01,                # Example: Number of warmup steps
+        warmup_ratio=0.005,                # Example: Number of warmup steps
         report_to='none',         # Report to TensorBoard
         logging_steps=2,
         # eval_strategy="steps",     # Evaluate every `eval_steps`
