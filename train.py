@@ -115,7 +115,7 @@ if __name__ == "__main__":
     ref_model = AutoModelForCausalLM.from_pretrained(model_name,
                                                      torch_dtype=torch.bfloat16,
                                                      attn_implementation="flash_attention_2",
-                                                     device_map="auto")  # device_map="auto"로 GPU에 자동 할당
+                                                     )  # device_map="auto"로 GPU에 자동 할당
     
     # 패딩 토큰 ID 설정
     model.config.pad_token_id = tokenizer.pad_token_id

@@ -85,6 +85,10 @@ class SPOLoss(nn.Module):
                                              labels: torch.Tensor
                                             ) -> torch.Tensor:
         # self.reference_model이 None인 경우는 forward에서 beta > 0일 때 미리 체크함.
+        current_device = policy_logits.device
+        if self.reference_model.device != current_device:
+            self.reference_model.to(current_device)
+    
         with torch.no_grad():
             ref_outputs = self.reference_model(input_ids=input_ids, attention_mask=attention_mask) # type: ignore
             ref_logits = ref_outputs.logits
@@ -224,6 +228,11 @@ class SPOLoss(nn.Module):
                 )
         
         total_loss = final_preference_loss + self.beta * kl_divergence_loss
+        # 디버깅을 위해 각 손실 요소 출력
+        print(f"Final Preference Loss: {final_preference_loss.item()}")
+        print(f"KL Divergence Loss (raw): {kl_divergence_loss.item()}")
+        print(f"Beta * KL Divergence Loss: {(self.beta * kl_divergence_loss).item()}")
+        print(f"Total Loss: {total_loss.item()}")
         return total_loss
     
 # --- 2. Custom Trainer Class (compute_loss 수정) ---
@@ -238,6 +247,7 @@ class CustomSPOTrainer(Trainer):
 
 
         loss = self.spo_loss_fn.forward(model, inputs)
+        loss = loss/ num_items_in_batch if num_items_in_batch is not None else loss
 
         return (loss, None) if return_outputs else loss
 
