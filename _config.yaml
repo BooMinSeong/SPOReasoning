@@ -1,4 +1,6 @@
-# _config.yml 파일에 추가
+# Conversion
 markdown: kramdown
-kramdown:
-  math_engine: katex # 또는 mathjax
+highlighter: rouge
+lsi: false
+excerpt_separator: "\n\n"
+incremental: false
