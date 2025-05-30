@@ -1,8 +1,3 @@
----
-title: "R-SPO, Failure in Parallel Feedback Learning and the Limits of Superficial Alignment"
-use_math: true
----
-
 # Introduction
 Test-Time Computation (TTC) has been adopted to enhance large language models by allocating more computation during the inference process. This additional computation is utilized either to generate longer Chains of Thought (CoT) [ref] or to execute majority voting ensembles.
 
