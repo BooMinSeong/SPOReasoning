@@ -180,18 +180,18 @@ class SPOLoss(nn.Module):
                         chosen_log_prob,
                         candidates_denominator_log_probs
                     )
-                    if self.use_spo_mu:
-                        mu_k = self._calculate_mu_k_spo(
-                            k, current_sample_log_probs_policy_ranked
-                            # k, current_sample_scores_ranked
-                        )
-                    else:
-                        mu_k = self._calculate_mu_k(
-                            # k, current_sample_log_probs_policy_ranked
-                            k, current_sample_scores_ranked
-                        )
-                    print(f"::: mu_k for sample {i}, k={k}: {mu_k.item()}")
-                    term_k = -(1.0 / self.alpha) * term_k_log_ratio * mu_k
+                    # if self.use_spo_mu:
+                    #     mu_k = self._calculate_mu_k_spo(
+                    #         k, current_sample_log_probs_policy_ranked
+                    #         # k, current_sample_scores_ranked
+                    #     )
+                    # else:
+                    #     mu_k = self._calculate_mu_k(
+                    #         # k, current_sample_log_probs_policy_ranked
+                    #         k, current_sample_scores_ranked
+                    #     )
+                    # print(f"::: mu_k for sample {i}, k={k}: {mu_k.item()}")
+                    term_k = -(1.0 / self.alpha) * term_k_log_ratio * 1
                     total_preference_loss_terms.append(term_k)
         
         if len(total_preference_loss_terms) > 0:
