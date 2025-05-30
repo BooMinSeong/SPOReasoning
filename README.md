@@ -94,14 +94,18 @@ For example, a large difference in PRM scores between $y_{i,k}$ and subsequent i
 
 The final preference loss $\mathcal{L}_{\text{pref}}$ is the average of these weighted terms across all valid comparisons ($k$ from $0$ to $N-2$) for all samples $i$ in the batch:
 
-$$ \mathcal{L}_{\text{pref}} = \underset{i,k}{\text{mean}} \left( \mathcal{L}_{i,k}^{\text{term}} \right) $$
+$$
+\mathcal{L}_{\text{pref}} = \underset{i,k}{\text{mean}} \left( \mathcal{L}_{i,k}^{\text{term}} \right)
+$$
 
 ---
 
 ### KL Divergence Regularization ($\mathcal{L}_{\text{KL}}$)
 To maintain the foundational capabilities of the policy model $\pi_{\theta}$ and prevent it from diverging too drastically from a stable reference distribution $\pi_{\text{ref}}$, we employ a **KL divergence penalty** $\mathcal{L}_{\text{KL}}$. This term encourages the policy's token-level output distribution to remain close to that of the reference model:
 
-$$ \mathcal{L}_{\text{KL}} = \mathbb{E}_{ (x, y) \sim \mathcal{D}_{\text{KL}} } \left[ \frac{1}{|y|} \sum_{t=1}^{|y|} D_{\text{KL}}\left( \pi_{\theta}(y_t|y_{<t},x) || \pi_{\text{ref}}(y_t|y_{<t},x) \right) \right] $$
+$$
+\mathcal{L}_{\text{KL}} = \mathbb{E}_{ (x, y) \sim \mathcal{D}_{\text{KL}} } \left[ \frac{1}{|y|} \sum_{t=1}^{|y|} D_{\text{KL}}\left( \pi_{\theta}(y_t|y_{<t},x) || \pi_{\text{ref}}(y_t|y_{<t},x) \right) \right]
+$$
 
 where $D_{\text{KL}}(P||Q) = \sum P(z) \log(P(z)/Q(z))$. The data $\mathcal{D}_{\text{KL}}$ for this calculation consists of the candidate responses $\{y_{i,k}\}$ themselves. This regularization is weighted by the hyperparameter $\beta$.
 
