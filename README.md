@@ -1,5 +1,5 @@
 # Introduction
-Test-Time Computation (TTC) has been adopted to enhance large language models by allocating more computation during the inference process. This additional computation is utilized either to generate longer Chains of Thought (CoT) [ref] or to execute majority voting ensembles.
+Test-Time Computation (TTC) has been adopted to enhance large language models by allocating more computation during the inference process. This additional computation is utilized either to generate longer [Chain of Thought (COT)](https://proceedings.neurips.cc/paper_files/paper/2022/hash/9d5609613524ecf4f15af0f7b31abca4-Abstract-Conference.html?ref=https://githubhelp.com) or to execute majority voting ensembles.
 
 TTC can be implemented in two ways:
 
@@ -8,7 +8,7 @@ TTC can be implemented in two ways:
 
 Generally, sequential generation methods often exhibit superior performance in inference model research. This is because the model can learn error correction abilities based on the context.
 
-This study raises the following question: Can models learn feedback in a parallel manner? It has been difficult to properly compare parallel TTC and sequential TTC "from the perspective of feedback," as self-feedback leveraging the model's internal knowledge might be contextually more advantageous than feedback from an external evaluator. Similar approaches have traditionally used methods like PPO [ref] and DPO [ref] for human preference and safety alignment.
+This study raises the following question: Can models learn feedback in a parallel manner? It has been difficult to properly compare parallel TTC and sequential TTC "from the perspective of feedback," as self-feedback leveraging the model's internal knowledge might be contextually more advantageous than feedback from an external evaluator. Similar approaches have traditionally used methods like [PPO](https://arxiv.org/abs/1707.06347) and [DPO](https://arxiv.org/abs/2305.18290) for human preference and safety alignment.
 
 However, these methods mostly rely on pairwise comparisons and evaluations and are not structured to receive feedback from multiple samples simultaneously, as in parallel evaluation in TTC. Most are based on a query and a pair of win-lose responses, typically resulting in moving away from, or rejecting, the "lose" response. In logical reasoning processes, simply "rejecting" (i.e., excluding incorrect or low-scoring responses) may not always be the optimal learning direction. Even incomplete paths can contain partially valid reasoning, necessitating an approach that assigns weight to these.
 
@@ -22,13 +22,13 @@ Therefore, this study attempted to learn correct reasoning paths by receiving pa
 # Related Work
 ## Test-Time Computing
 
-Numerous efforts have been made to improve model performance through test-time computing methods. For example, DeepSeek-R1 [ref] was trained with reinforcement learning and a large number of examples, while [s1] demonstrated that strong performance can be achieved with only 1,000 curated examples extracted from Gemini-Flash-Thinking. Recursive introspection has shown that turn-based learning can further enhance a model's reasoning capabilities. Additionally, research on parallel test-time computing includes methods like Tree Search. These methods rely on external judgments, such as PRM or Majority Vote, and their upside is dependent on the PRM's performance. Therefore, this study aims to strengthen a model's reasoning capabilities by leveraging its internal knowledge to **learn parameter-based feedback in parallel**.
+Numerous efforts have been made to improve model performance through test-time computing methods. For example, [Deepseek-R1](https://arxiv.org/abs/2501.12948)  was trained with reinforcement learning and a large number of examples, while [S1](https://arxiv.org/abs/2501.19393) demonstrated that strong performance can be achieved with only 1,000 curated examples extracted from Gemini-Flash-Thinking. Recursive introspection has shown that turn-based learning can further enhance a model's reasoning capabilities. Additionally, research on parallel test-time computing includes methods like Tree Search. These methods rely on external judgments, such as PRM or Majority Vote, and their upside is dependent on the PRM's performance. Therefore, this study aims to strengthen a model's reasoning capabilities by leveraging its internal knowledge to **learn parameter-based feedback in parallel**.
 
 ---
 
 ## RL Alignment
 
-The spectrum of offline RL methodologies ranges from implicit reward processing to explicit value modeling. Methods like DPO [ref] simplify the reinforcement learning problem by implicitly processing rewards through preferences. Process-supervised methods such as PURE and RRO [ref], and hierarchical methods like GLIDER, lie in between or combine multiple aspects, often requiring more structured reward signals like step-by-step rewards. OREO [ref] also learns a value function but does so within a maximum entropy RL framework. SPO, which inspires our work, similarly generalizes from multiple samples based on implicit reward signals, much like DPO. However, given that external reward models currently effectively increase performance in Test-Time Computing methodologies, this study proposes to replace this reward signal with an **external signal and utilize it for the inference model**.
+The spectrum of offline RL methodologies ranges from implicit reward processing to explicit value modeling. Methods like DPO simplify the reinforcement learning problem by implicitly processing rewards through preferences. Process-supervised methods such as [RRO](https://arxiv.org/abs/2505.20737), and hierarchical methods like GLIDER, lie in between or combine multiple aspects, often requiring more structured reward signals like step-by-step rewards. SPO, which inspires our work, similarly generalizes from multiple samples based on implicit reward signals, much like DPO. However, given that external reward models currently effectively increase performance in Test-Time Computing methodologies, this study proposes to replace this reward signal with an **external signal and utilize it for the inference model**.
 
 ---
 # Method
@@ -39,7 +39,7 @@ The data used for model training was constructed through the following process. 
 
 Specifically, for 7,500 training data points from the MATH dataset, we sampled 10 Chain-of-Thought (CoT) answers using LLaMA's official evaluation prompt with a Temperature of 1.0.
 
-Among the sampled answers, **problems where the model consistently got the correct answer or consistently gave incorrect answers were filtered out**. This is because we determined that these problems belonged to the model's fixed knowledge boundaries [ref] (Google Test-Time Scaling). By selecting problems where the model alternated between correct and incorrect answers based on the sampling results, we aimed to encourage the model to 'verify' and receive feedback on more correct solution paths for problems it occasionally gets wrong.
+Among the sampled answers, **problems where the model consistently got the correct answer or consistently gave incorrect answers were filtered out**. This is because we determined that these problems belonged to the model's fixed knowledge boundaries [1](https://arxiv.org/abs/2408.03314) . By selecting problems where the model alternated between correct and incorrect answers based on the sampling results, we aimed to encourage the model to 'verify' and receive feedback on more correct solution paths for problems it occasionally gets wrong.
 
 The quality of answers from these filtered data points was **measured using a PRM**. The PRM provides a step-by-step quality score si​ for each model response. In this study, we determined the overall response quality score as the most straightforward method: the average of the model's step-by-step scores.
 
@@ -48,7 +48,7 @@ Finally, after sampling N answers from the data that had acquired PRM scores, we
 ##  Reasoning Soft Preference Optimization
 
 ###  Reasoning Soft Preference Optimization (R-SPO)
-As previously discussed, based on the need to effectively learn from parallel candidate generation and rank-based feedback, **Reasoning Soft Preference Optimization (R-SPO)**, proposed building upon the ideas of SPO[ref], aims to improve the policy model $\pi_{\theta}$'s ability to identify and prefer superior reasoning paths. Traditional methods like PPO or DPO, while useful for alignment, typically rely on pairwise win-loss comparisons and may not fully leverage the richer information present in multi-candidate lists generated simultaneously. Furthermore, for logical reasoning tasks, simply rejecting "losing" paths may not be optimal, as even incomplete paths can contain partially valuable reasoning. R-SPO addresses these issues by learning from a ranked list of responses (ranked by PRM scores as described in Section [prepare_reward_data], applying nuanced and weighted preferences across the entire ranking set.
+As previously discussed, based on the need to effectively learn from parallel candidate generation and rank-based feedback, **Reasoning Soft Preference Optimization (R-SPO)**, proposed building upon the ideas of [SPO](https://arxiv.org/abs/2405.00747), aims to improve the policy model $\pi_{\theta}$'s ability to identify and prefer superior reasoning paths. Traditional methods like PPO or DPO, while useful for alignment, typically rely on pairwise win-loss comparisons and may not fully leverage the richer information present in multi-candidate lists generated simultaneously. Furthermore, for logical reasoning tasks, simply rejecting "losing" paths may not be optimal, as even incomplete paths can contain partially valuable reasoning. R-SPO addresses these issues by learning from a ranked list of responses (ranked by PRM scores as described in Section **prepare_reward_data**, applying nuanced and weighted preferences across the entire ranking set.
 
 The total R-SPO loss $\mathcal{L}_{\text{R-SPO}}$ consists of a **preference loss** $\mathcal{L}_{\text{pref}}$ and an optional **Kullback-Leibler (KL) divergence regularization term** $\mathcal{L}_{\text{KL}}$ against a reference model $\pi_{\text{ref}}$:
 $$
@@ -93,6 +93,7 @@ $$
 
 ### KL Divergence Regularization ($\mathcal{L}_{\text{KL}}$)
 To maintain the foundational capabilities of the policy model $\pi_{\theta}$ and prevent it from diverging too drastically from a stable reference distribution $\pi_{\text{ref}}$, we employ a **KL divergence penalty** $\mathcal{L}_{\text{KL}}$. This term encourages the policy's token-level output distribution to remain close to that of the reference model:
+
 $$ \mathcal{L}_{\text{KL}} = \mathbb{E}_{ (x, y) \sim \mathcal{D}_{\text{KL}} } \left[ \frac{1}{|y|} \sum_{t=1}^{|y|} D_{\text{KL}}\left( \pi_{\theta}(y_t|y_{<t},x) || \pi_{\text{ref}}(y_t|y_{<t},x) \right) \right] $$
 where $D_{\text{KL}}(P||Q) = \sum P(z) \log(P(z)/Q(z))$. The data $\mathcal{D}_{\text{KL}}$ for this calculation consists of the candidate responses $\{y_{i,k}\}$ themselves. This regularization is weighted by the hyperparameter $\beta$.
 
@@ -129,7 +130,7 @@ As shown in **Table 1**, the R-SPO methodology consistently exhibited lower perf
 
 Figure 1: Changes in PRM scores according to training epochs.
 
-We also investigated the relationship between the PRM scores and the model's actual answer correctness. **Figure 1** illustrates the trend of PRM scores throughout training. While this graph shows how PRM scores change with training epochs, it is important to note that, as we will discuss further in the **Discussion** section, this change in PRM scores does not directly correlate with the model's actual answer correctness. [ref]
+We also investigated the relationship between the PRM scores and the model's actual answer correctness. **Figure 1** illustrates the trend of PRM scores throughout training. While this graph shows how PRM scores change with training epochs, it is important to note that, as we will discuss further in the **Discussion** section, this change in PRM scores does not directly correlate with the model's actual answer correctness.
 
 ---
 
@@ -184,6 +185,3 @@ Our findings reveal several key limitations of the current R-SPO implementation 
 - **Improving PRM Robustness:** Developing **more robust PRMs** that are less susceptible to superficial cues is critical. This might involve advanced architectures or adversarial training.
 - **Scaling Up Data and Models:** Investigating the impact of **significantly larger and more diverse training datasets** for alignment.
 - **Exploring Alternative Objectives:** Researching other offline reinforcement learning or preference optimization objectives that offer stronger guarantees for complex reasoning with imperfect reward signals.
-
-# References
-[CoT](https://proceedings.neurips.cc/paper_files/paper/2022/hash/9d5609613524ecf4f15af0f7b31abca4-Abstract-Conference.html?ref=https://githubhelp.com)
