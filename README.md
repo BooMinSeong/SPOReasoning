@@ -156,7 +156,7 @@ Based on the 8th epoch, which showed the highest performance, we conducted train
 | --------------- | ---------- | --------- | ------------- |
 | Greedy          |            | 4.81      | 5.8           |
 | Sampling        | maj5 (%)   | 7.0       | 6.8           |
-|                 | pass@1 (%) | 19.8      | 17            
+|                 | pass@1 (%) | 19.8      | 17            |
 **Table 2: Comparison of R-SPO performance with and without the μ weight at epoch 8.**
 
 The results in **Table 2** indicate that for greedy decoding, removing the μ weight led to a slight performance improvement (from 4.81% to 5.8%). However, for sampling-based decoding, R-SPO with the μ weight applied showed better performance (Maj5 7.0% vs. 6.8%, Pass@1 19.8% vs. 17.0%). This suggests that the μ weight helped the model adapt better to strong reward responses, and overall, applying the μ weight provided benefits in sampling-based inference.
