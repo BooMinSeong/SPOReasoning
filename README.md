@@ -134,6 +134,7 @@ The performance of our proposed R-SPO method across different training epochs is
 | Greedy   |            | 4.0       | 3.2 | 4.2  | ==**4.81**== | **25.8** |
 | Sampling | maj5 (%)   | 3.2       | 4.0 | 4.8  | ==**7.0**==  | **29.2** |
 |          | pass@1 (%) | 13.8      | 8.6 | 14.0 | ==**19.8**== | **46.0** |
+
 **Table 1** R-SPO performance on the MATH dataset at various training epochs, compared to the base Instruction model.**
 
 As shown in **Table 1**, the R-SPO methodology consistently exhibited lower performance compared to the baseline model. Specifically, with greedy decoding, R-SPO achieved a maximum accuracy of 4.81%, while the baseline reached 25.8%. Similarly low performance was observed with sampling-based decoding.
